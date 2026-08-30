@@ -1,0 +1,789 @@
+#!/usr/bin/env node
+/**
+ * external-advisor runner.
+ *
+ * Invokes an external CLI coding agent in its read-only mode and returns a normalized JSON
+ * envelope on stdout. Provider-specific argv lives in PROVIDERS so a
+ * second CLI (codex, gemini) can be added without touching run/guard/persistence logic.
+ *
+ * Usage:
+ *   node run.mjs review  [--repo P] [--pr N] [--base REF] [--task STR] [--model M] [--timeout S]
+ *   node run.mjs consult  --packet FILE [--repo P] [--model M] [--timeout S]
+ *   node run.mjs advise   [--question STR] [--context FILE] [--repo P] [--model M] [--timeout S]
+ *   node run.mjs resume   --session ID --message STR [--repo P] [--model M]
+ *   node run.mjs sync-labels
+ *   node run.mjs doctor
+ *   node run.mjs models
+ */
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SKILL_DIR = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(homedir(), '.claude', 'external-advisor');
+const RUNS = join(ROOT, 'runs');
+const CONFIG_PATH = join(ROOT, 'config.json');
+
+const DEFAULT_CONFIG = {
+  provider: 'cursor',
+  models: {
+    review: 'gpt-5.3-codex-high',
+    advise: 'gpt-5.6-sol-high',
+    consult: 'gpt-5.6-sol-high',
+  },
+  timeoutSeconds: 900,
+  keepRuns: 20,
+  sandbox: 'enabled',
+  maxDiffBytes: 400000,
+  maxAdviseBytes: 160000,
+};
+
+/**
+ * Provider adapters. `args` must produce a read-only invocation: for cursor-agent that is
+ * `--mode ask` (verified to refuse writes), not `-p` alone, which still carries write and
+ * shell tools. `--trust` is required or headless runs block on the workspace-trust prompt.
+ */
+const PROVIDERS = {
+  cursor: {
+    bin: 'cursor-agent',
+    installHint: 'curl https://cursor.com/install -fsS | bash',
+    loginHint: 'cursor-agent login  (opens a browser; the user must run this themselves)',
+    buildArgs({ model, workspace, addDir, sandbox, resume }) {
+      const a = ['-p', '--mode', 'ask', '--trust', '--output-format', 'json'];
+      if (workspace) a.push('--workspace', workspace);
+      if (sandbox) a.push('--sandbox', sandbox);
+      if (model) a.push('--model', model);
+      if (addDir) a.push('--add-dir', addDir);
+      if (resume) a.push('--resume', resume);
+      return a;
+    },
+    // Success emits one JSON object with type "result". Auth and model failures exit 1 with
+    // plain text, so a parse failure is a real failure and the raw text is the only signal.
+    parse(stdout) {
+      const lines = stdout.trim().split('\n').filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const o = JSON.parse(lines[i]);
+          if (o && o.type === 'result') return o;
+        } catch {}
+      }
+      return null;
+    },
+  },
+};
+
+function loadConfig() {
+  let user = {};
+  if (existsSync(CONFIG_PATH)) {
+    try {
+      user = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+    } catch (e) {
+      fail(`config.json is not valid JSON (${CONFIG_PATH}): ${e.message}`);
+    }
+  }
+  return { ...DEFAULT_CONFIG, ...user, models: { ...DEFAULT_CONFIG.models, ...(user.models || {}) } };
+}
+
+function parseArgs(argv) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) out[key] = true;
+      else {
+        out[key] = next;
+        i++;
+      }
+    } else out._.push(a);
+  }
+  return out;
+}
+
+function git(repo, args) {
+  try {
+    return execFileSync('git', args, {
+      cwd: repo,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    return '';
+  }
+}
+
+function isRepo(repo) {
+  return git(repo, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
+}
+
+/**
+ * Content fingerprint of the working tree, used to detect writes during a run.
+ * Covers the status list, the tracked diff, and size+mtime of untracked files - porcelain
+ * output alone reports only status codes and paths, so an already-dirty or already-untracked
+ * file can be modified further without its status line changing at all.
+ * Git-ignored files are deliberately out of scope; hashing them would mean walking node_modules.
+ */
+function treeFingerprint(repo) {
+  if (!isRepo(repo)) return null;
+  const h = createHash('sha256');
+  h.update(git(repo, ['status', '--porcelain']));
+  h.update(git(repo, ['diff', 'HEAD']));
+  for (const rel of git(repo, ['ls-files', '--others', '--exclude-standard']).split('\n').filter(Boolean)) {
+    try {
+      const st = statSync(join(repo, rel));
+      h.update(`${rel}:${st.size}:${st.mtimeMs}`);
+    } catch {
+      h.update(`${rel}:missing`);
+    }
+  }
+  return h.digest('hex');
+}
+
+function slug(p) {
+  return p.replace(/^.*\//, '') + '-' + Buffer.from(p).toString('base64url').slice(-6);
+}
+
+function stamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+}
+
+/**
+ * Per-invocation suffix. Timestamps are only second-precise, so two runs started together shared
+ * a run directory and silently overwrote each other's packet - each agent then read whichever
+ * packet won the race and answered the wrong question.
+ */
+function runId() {
+  return `${stamp()}-${process.pid.toString(36)}${randomBytes(2).toString('hex')}`;
+}
+
+/** Thrown by fail() so the caller unwinds; main()'s catch treats it as already-reported. */
+class Reported extends Error {}
+
+function fail(msg, extra = {}) {
+  process.stdout.write(JSON.stringify({ ok: false, error: msg, ...extra }, null, 2) + '\n');
+  process.exitCode = 1;
+  throw new Reported(msg);
+}
+
+function pruneRuns(dir, keep) {
+  if (!existsSync(dir)) return;
+  const entries = readdirSync(dir)
+    .map((n) => ({ n, p: join(dir, n) }))
+    .filter((e) => {
+      try {
+        return statSync(e.p).isDirectory();
+      } catch {
+        return false;
+      }
+    })
+    .sort((a, b) => b.n.localeCompare(a.n));
+  for (const e of entries.slice(keep)) rmSync(e.p, { recursive: true, force: true });
+}
+
+/** Spawns the provider, enforcing a hard timeout: SIGTERM at the deadline, SIGKILL 5s later. */
+function runAgent(bin, args, prompt, cwd, timeoutSeconds) {
+  return new Promise((resolveP) => {
+    const started = Date.now();
+    const child = spawn(bin, [...args, prompt], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    const term = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 5000);
+    }, timeoutSeconds * 1000);
+    child.on('error', (e) => {
+      clearTimeout(term);
+      resolveP({ code: -1, stdout, stderr: String(e.message), timedOut, elapsedMs: Date.now() - started });
+    });
+    child.on('close', (code) => {
+      clearTimeout(term);
+      resolveP({ code, stdout, stderr, timedOut, elapsedMs: Date.now() - started });
+    });
+  });
+}
+
+function readPrompt(name) {
+  const p = join(SKILL_DIR, 'prompts', `${name}.md`);
+  if (!existsSync(p)) fail(`missing prompt template: ${p}`);
+  return readFileSync(p, 'utf8');
+}
+
+/**
+ * Assembles the review context. With --base, the merge-base diff of that ref against HEAD;
+ * otherwise the uncommitted working-tree diff. Oversized diffs are truncated with an explicit
+ * note listing what was dropped, so the reviewer is never silently reading a partial change.
+ */
+function collectDiff(repo, base, maxBytes) {
+  let label, stat, diff;
+  if (base) {
+    label = `${base}...HEAD (merge-base)`;
+    stat = git(repo, ['diff', '--stat', `${base}...HEAD`]);
+    diff = git(repo, ['diff', `${base}...HEAD`]);
+  } else {
+    label = 'uncommitted working tree (vs HEAD)';
+    stat = git(repo, ['diff', '--stat', 'HEAD']);
+    diff = git(repo, ['diff', 'HEAD']);
+  }
+  const untracked = base ? '' : git(repo, ['ls-files', '--others', '--exclude-standard']).trim();
+  let truncated = null;
+  if (diff.length > maxBytes) {
+    truncated = `Diff was ${diff.length} bytes, truncated to ${maxBytes}. The file summary above is complete; the diff body below is not. Ask for specific files if you need what was cut.`;
+    diff = diff.slice(0, maxBytes);
+  }
+  return { label, stat, diff, untracked, truncated };
+}
+
+/**
+ * Locates the live Claude Code transcript for this session. The project directory is the cwd
+ * with every non-alphanumeric character replaced by a dash.
+ * Note: a subagent inherits its PARENT's CLAUDE_CODE_SESSION_ID, so from inside a subagent this
+ * resolves to the parent's conversation, not its own - subagents should pass --context instead.
+ */
+function findTranscript(repo) {
+  const sid = process.env.CLAUDE_CODE_SESSION_ID;
+  if (!sid) return null;
+  const projectDir = join(homedir(), '.claude', 'projects', repo.replace(/[^a-zA-Z0-9]/g, '-'));
+  const path = join(projectDir, `${sid}.jsonl`);
+  return existsSync(path) ? { path, sessionId: sid } : null;
+}
+
+function oneLine(text, max) {
+  const flat = String(text).replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}… (${flat.length - max} more chars)` : flat;
+}
+
+/**
+ * Turns a transcript into a readable story: human turns, the agent's own prose, and tool calls
+ * reduced to name plus a truncated argument and result. The raw file is mostly tool payloads -
+ * dropping them is what makes a 1.5MB session fit in a prompt. Oldest turns are dropped first
+ * when over budget, and the count of dropped turns is reported rather than silently swallowed.
+ */
+function distillTranscript(path, maxBytes) {
+  const stripReminders = (t) => String(t).replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+  const turns = [];
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    let d;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (d.type !== 'user' && d.type !== 'assistant') continue;
+    const msg = d.message;
+    if (!msg) continue;
+    const parts = [];
+    const content = msg.content;
+    if (typeof content === 'string') parts.push(stripReminders(content));
+    else if (Array.isArray(content)) {
+      for (const b of content) {
+        if (!b || typeof b !== 'object') continue;
+        if (b.type === 'text') parts.push(stripReminders(b.text || ''));
+        // Thinking blocks are persisted with their text stripped (signature only), so there is
+        // no reasoning to forward - emitting the marker would imply content that isn't there.
+        else if (b.type === 'thinking') continue;
+        else if (b.type === 'tool_use') parts.push(`[ran ${b.name}] ${oneLine(JSON.stringify(b.input || {}), 300)}`);
+        else if (b.type === 'tool_result') {
+          const raw = typeof b.content === 'string' ? b.content : JSON.stringify(b.content || '');
+          parts.push(`[result] ${oneLine(raw, 500)}`);
+        }
+      }
+    }
+    const text = parts.filter(Boolean).join('\n').trim();
+    if (text) turns.push(`### ${msg.role === 'user' ? 'Human' : 'Agent'}\n\n${text}`);
+  }
+  let kept = turns;
+  let dropped = 0;
+  while (kept.length > 1 && Buffer.byteLength(kept.join('\n\n')) > maxBytes) {
+    kept = kept.slice(1);
+    dropped++;
+  }
+  return { text: kept.join('\n\n'), dropped, total: turns.length };
+}
+
+/**
+ * Checks out a PR head in a throwaway worktree so the reviewer reads the PR's real code, not the
+ * local checkout. Uses a private ref namespace and a detached worktree, so no branch is created
+ * and the caller's working tree is never touched; cleanup() removes both.
+ */
+function preparePr(repo, number) {
+  let meta;
+  try {
+    meta = JSON.parse(
+      execFileSync('gh', ['pr', 'view', number, '--json', 'number,title,body,headRefName,baseRefName,state'], {
+        cwd: repo,
+        encoding: 'utf8',
+        maxBuffer: 32 * 1024 * 1024,
+      }),
+    );
+  } catch (e) {
+    fail(`could not read PR #${number} via gh: ${String(e.stderr || e.message).trim().slice(0, 300)}`);
+  }
+
+  const token = runId();
+  const ref = `refs/external-advisor/pr-${number}-${token}`;
+  const worktree = join(ROOT, 'worktrees', `pr-${number}-${token}`);
+  const cleanupRef = () => git(repo, ['update-ref', '-d', ref]);
+  git(repo, ['fetch', '--quiet', '--force', 'origin', `pull/${number}/head:${ref}`]);
+  if (!git(repo, ['rev-parse', '--verify', '--quiet', ref]).trim()) {
+    fail(`could not fetch pull/${number}/head from origin (is the PR from a fork with no head ref?)`);
+  }
+  // git() swallows errors, so a failed base fetch would silently review against a stale
+  // origin/<base> and produce a plausible verdict on the wrong diff.
+  const baseRef = `origin/${meta.baseRefName}`;
+  git(repo, ['fetch', '--quiet', 'origin', meta.baseRefName]);
+  const afterBase = git(repo, ['rev-parse', '--verify', '--quiet', baseRef]).trim();
+  if (!afterBase) {
+    cleanupRef();
+    fail(`could not resolve ${baseRef} after fetching; refusing to review against a missing base`);
+  }
+
+  // Registering on 'exit' rather than a `finally` is what guarantees the worktree and ref are
+  // removed on every path, including signals; git's helpers are synchronous so they still run
+  // inside an exit handler.
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    git(repo, ['worktree', 'remove', '--force', worktree]);
+    git(repo, ['update-ref', '-d', ref]);
+    rmSync(worktree, { recursive: true, force: true });
+    git(repo, ['worktree', 'prune']);
+  };
+  process.on('exit', cleanup);
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => {
+      cleanup();
+      process.exit(sig === 'SIGINT' ? 130 : 143);
+    });
+  }
+
+  mkdirSync(join(ROOT, 'worktrees'), { recursive: true });
+  git(repo, ['worktree', 'add', '--detach', worktree, ref]);
+  if (!existsSync(join(worktree, '.git'))) {
+    cleanup();
+    fail(`could not create a worktree for PR #${number} at ${worktree}`);
+  }
+
+  return {
+    worktree,
+    cleanup,
+    number: meta.number,
+    headRef: meta.headRefName,
+    base: `origin/${meta.baseRefName}`,
+    title: meta.title,
+    body:
+      (meta.body || '').length > 4000
+        ? `${meta.body.slice(0, 4000)}\n\n[...PR description truncated at 4000 of ${meta.body.length} characters...]`
+        : meta.body || '',
+  };
+}
+
+async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSeconds, resume, extraMeta }) {
+  // `repo` is the durable identity used for run history and the write guard; `workspace` is what
+  // the agent actually reads, which for a PR review is a throwaway worktree. Keying history off
+  // the worktree gave every PR run its own bucket, so keepRuns never pruned any of them.
+  const ws = workspace || repo;
+  const provider = PROVIDERS[cfg.provider];
+  if (!provider) fail(`unknown provider "${cfg.provider}"`);
+
+  const runDir = join(RUNS, slug(repo), `${runId()}-${verb}`);
+  mkdirSync(runDir, { recursive: true });
+  const packetPath = join(runDir, 'packet.md');
+  writeFileSync(packetPath, packetBody);
+
+  // Fingerprint both the durable repo and the workspace: for a PR review the agent operates in the
+  // worktree, and cleanup deletes it, so a write there would otherwise leave no trace at all.
+  const guardBefore = treeFingerprint(repo);
+  const wsGuardBefore = ws === repo ? null : treeFingerprint(ws);
+
+  const args = provider.buildArgs({
+    model,
+    workspace: ws,
+    addDir: runDir,
+    sandbox: cfg.sandbox,
+    resume,
+  });
+  const prompt = `Read the file ${packetPath} in full and follow its instructions exactly.`;
+  const res = await runAgent(provider.bin, args, prompt, ws, timeoutSeconds);
+
+  const guardAfter = treeFingerprint(repo);
+  const wsGuardAfter = ws === repo ? null : treeFingerprint(ws);
+  const treeChanged =
+    (guardBefore !== null && guardBefore !== guardAfter) ||
+    (wsGuardBefore !== null && wsGuardBefore !== wsGuardAfter);
+
+  writeFileSync(join(runDir, 'response.json'), res.stdout || res.stderr || '');
+
+  let envelope;
+  if (res.timedOut) {
+    envelope = {
+      ok: false,
+      error: `timed out after ${timeoutSeconds}s`,
+      raw: (res.stdout || res.stderr).slice(0, 4000),
+    };
+  } else if (res.code !== 0) {
+    envelope = {
+      ok: false,
+      error: `${provider.bin} exited ${res.code}`,
+      raw: (res.stderr || res.stdout).trim().slice(0, 4000),
+    };
+  } else {
+    const parsed = provider.parse(res.stdout);
+    if (!parsed) {
+      envelope = {
+        ok: false,
+        error: 'output was not parseable JSON',
+        raw: (res.stdout || res.stderr).trim().slice(0, 4000),
+      };
+    } else if (parsed.is_error) {
+      envelope = { ok: false, error: 'agent reported an error', raw: String(parsed.result || '').slice(0, 4000) };
+    } else {
+      envelope = {
+        ok: true,
+        result: parsed.result,
+        sessionId: parsed.session_id,
+        durationMs: parsed.duration_ms,
+        usage: parsed.usage || null,
+      };
+    }
+  }
+
+  const meta = {
+    verb,
+    repo,
+    workspace: ws,
+    provider: cfg.provider,
+    model: model || (resume ? "(the resumed session's own model)" : '(provider default)'),
+    runDir,
+    packetPath,
+    packetBytes: Buffer.byteLength(packetBody),
+    elapsedMs: res.elapsedMs,
+    exitCode: res.code,
+    timedOut: res.timedOut,
+    treeChanged,
+    guarded: ws === repo ? [repo] : [repo, ws],
+    sessionId: envelope.sessionId || null,
+    usage: envelope.usage || null,
+    startedAt: new Date(Date.now() - res.elapsedMs).toISOString(),
+    ...(extraMeta || {}),
+  };
+  writeFileSync(join(runDir, 'meta.json'), JSON.stringify(meta, null, 2));
+  pruneRuns(join(RUNS, slug(repo)), cfg.keepRuns);
+
+  // A guard violation fails the run even when the model answered, so `ok` has to reflect it:
+  // a caller reading only `ok` must not be able to miss a write.
+  const out = {
+    ...envelope,
+    ...(extraMeta || {}),
+    ok: envelope.ok && !treeChanged,
+    verb,
+    runDir,
+    packetPath,
+    model: meta.model,
+    elapsedMs: res.elapsedMs,
+    treeChanged,
+  };
+  if (treeChanged) {
+    out.guardViolation =
+      'The working tree changed during this run. A read-only advisor must not write. Inspect `git status` before trusting this output.';
+  }
+  process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+  process.exitCode = envelope.ok && !treeChanged ? 0 : 1;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const verb = args._[0];
+  const cfg = loadConfig();
+  const provider = PROVIDERS[cfg.provider];
+  const repo = resolve(args.repo || process.cwd());
+  const timeoutSeconds = Number(args.timeout || cfg.timeoutSeconds);
+
+  const pickModel = (kind) => (args.model && args.model !== true ? args.model : cfg.models[kind]);
+
+  if (verb === 'doctor') {
+    const found = (() => {
+      try {
+        return execFileSync('/bin/sh', ['-c', `command -v ${provider.bin}`], { encoding: 'utf8' }).trim();
+      } catch {
+        return '';
+      }
+    })();
+    if (!found) {
+      return fail(`${provider.bin} not found on PATH`, { installHint: provider.installHint, thenRun: provider.loginHint });
+    }
+    const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
+    const authed = res.code === 0;
+    const rows = authed
+      ? res.stdout
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l.includes(' - '))
+          .map((l) => [l.split(' - ')[0], l.split(' - ').slice(1).join(' - ').replace(/\s*\(current\)$/, '')])
+      : [];
+    const models = rows.map(([id]) => id);
+    // Display names are what the user sees in the terminal line, so setup can refresh the
+    // label table in config from here rather than anyone hand-maintaining model names.
+    const modelLabels = Object.fromEntries(rows);
+    process.stdout.write(
+      JSON.stringify(
+        {
+          ok: authed,
+          bin: found,
+          authenticated: authed,
+          authHint: authed ? null : provider.loginHint,
+          rawIfFailed: authed ? null : (res.stderr || res.stdout).trim().slice(0, 1000),
+          configPath: CONFIG_PATH,
+          configExists: existsSync(CONFIG_PATH),
+          config: cfg,
+          modelCount: models.length,
+          models,
+          modelLabels,
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+    process.exitCode = authed ? 0 : 1;
+    return;
+  }
+
+  if (verb === 'sync-labels') {
+    // Setup-time only. Caches display names for every model that is configured or has ever been
+    // used, so the terminal status line stays readable after a one-off --model override. Deliberately
+    // not done during a run: runs would be writing a shared config file concurrently.
+    const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
+    if (res.code !== 0) return fail('could not list models', { raw: (res.stderr || res.stdout).trim().slice(0, 600) });
+    const live = Object.fromEntries(
+      res.stdout
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.includes(' - '))
+        .map((l) => [l.split(' - ')[0], l.split(' - ').slice(1).join(' - ').replace(/\s*\(current\)$/, '')]),
+    );
+
+    const used = new Set(Object.values(cfg.models));
+    for (const repoDir of existsSync(RUNS) ? readdirSync(RUNS) : []) {
+      for (const run of readdirSync(join(RUNS, repoDir))) {
+        try {
+          const m = JSON.parse(readFileSync(join(RUNS, repoDir, run, 'meta.json'), 'utf8'));
+          if (m.model && live[m.model]) used.add(m.model);
+        } catch {}
+      }
+    }
+
+    const existing = cfg.modelLabels || {};
+    const labels = { ...existing };
+    for (const id of used) if (live[id]) labels[id] = live[id];
+    // Drop ids the provider no longer offers, so the table doesn't accumulate retired models.
+    for (const id of Object.keys(labels)) if (!live[id]) delete labels[id];
+
+    const onDisk = existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) : {};
+    onDisk.modelLabels = labels;
+    writeFileSync(CONFIG_PATH, `${JSON.stringify(onDisk, null, 2)}\n`);
+    process.stdout.write(
+      JSON.stringify(
+        { ok: true, configPath: CONFIG_PATH, labelCount: Object.keys(labels).length, added: Object.keys(labels).filter((k) => !(k in existing)), labels },
+        null,
+        2,
+      ) + '\n',
+    );
+    return;
+  }
+
+  if (verb === 'models') {
+    const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
+    process.stdout.write(res.stdout || res.stderr);
+    process.exitCode = res.code === 0 ? 0 : 1;
+    return;
+  }
+
+  if (verb === 'review') {
+    if (!isRepo(repo)) fail(`not a git repository: ${repo}`);
+
+    // --pr reviews from a throwaway worktree checked out at the PR head so the agent reads the
+    // PR's actual code. Reviewing a PR diff against the local checkout yields confident, wrong
+    // findings about call sites the PR did in fact update.
+    const pr = args.pr && args.pr !== true ? preparePr(repo, String(args.pr)) : null;
+    const reviewRoot = pr ? pr.worktree : repo;
+
+    try {
+      const { label, stat, diff, untracked, truncated } = collectDiff(
+        reviewRoot,
+        pr ? pr.base : args.base === true ? null : args.base,
+        cfg.maxDiffBytes,
+      );
+      if (!diff.trim()) {
+        const def =
+          git(repo, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).trim().replace('origin/', '') || 'main';
+        return fail(`no diff found for ${label}. Pass --base <ref> (this repo's default branch looks like "${def}").`);
+      }
+      const branch = pr
+        ? `PR #${pr.number} - ${pr.headRef} (worktree checked out at the PR head)`
+        : git(reviewRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+      const task =
+        args.task && args.task !== true
+          ? args.task
+          : pr
+            ? [pr.title, pr.body].filter(Boolean).join('\n\n')
+            : '(none supplied)';
+      const body = [
+        readPrompt('review'),
+        '',
+        '---',
+        '',
+        '## What the author says this change is for',
+        '',
+        task,
+        '',
+        '## Repository',
+        '',
+        `- Path: ${reviewRoot}`,
+        `- Branch: ${branch}`,
+        `- Diff scope: ${label}`,
+        '',
+        '## Files changed',
+        '',
+        '```',
+        stat.trim() || '(none)',
+        '```',
+        untracked ? `\n## Untracked files (not in the diff below)\n\n\`\`\`\n${untracked}\n\`\`\`` : '',
+        truncated ? `\n> **Truncation notice:** ${truncated}` : '',
+        '',
+        '## Diff',
+        '',
+        '```diff',
+        diff,
+        '```',
+        '',
+      ].join('\n');
+      return await invoke({
+        cfg,
+        verb: 'review',
+        repo,
+        workspace: reviewRoot,
+        model: pickModel('review'),
+        packetBody: body,
+        timeoutSeconds,
+      });
+    } finally {
+      if (pr) pr.cleanup();
+    }
+  }
+
+
+  if (verb === 'advise') {
+    let story;
+    let source;
+    if (args.context && args.context !== true) {
+      if (!existsSync(args.context)) fail(`context file not found: ${args.context}`);
+      story = readFileSync(args.context, 'utf8');
+      source = { kind: 'context-file', path: args.context };
+    } else {
+      const found = findTranscript(repo);
+      if (!found) {
+        return fail(
+          'could not locate this session transcript (CLAUDE_CODE_SESSION_ID unset or no transcript file). Pass --context <file> with a written summary instead.',
+        );
+      }
+      const d = distillTranscript(found.path, cfg.maxAdviseBytes);
+      if (!d.text.trim()) fail(`transcript at ${found.path} distilled to nothing`);
+      story = d.text;
+      // A subagent inherits the parent's session id, so auto-detect quietly hands it the parent's
+      // conversation and the advice looks plausible while being about someone else's work. There
+      // is no reliable way to detect that from inside the process, so name the session loudly and
+      // let the caller notice it isn't theirs.
+      source = {
+        kind: 'transcript',
+        path: found.path,
+        sessionId: found.sessionId,
+        turns: d.total,
+        droppedOldestTurns: d.dropped,
+        ageSeconds: Math.round((Date.now() - statSync(found.path).mtimeMs) / 1000),
+      };
+    }
+
+    const question =
+      args.question && args.question !== true
+        ? args.question
+        : 'No specific question - give the agent your general assessment of how this work is going.';
+    const body = [
+      readPrompt('advise'),
+      '',
+      '---',
+      '',
+      '## What the agent wants to know',
+      '',
+      question,
+      '',
+      '## Working directory',
+      '',
+      repo,
+      '',
+      source.kind === 'transcript' && source.droppedOldestTurns
+        ? `> **Note:** the ${source.droppedOldestTurns} oldest turns were dropped to fit; the story below starts mid-task.\n`
+        : '',
+      '## The story so far',
+      '',
+      story,
+      '',
+    ].join('\n');
+    const extraMeta = { contextSource: source };
+    if (source.kind === 'transcript') {
+      extraMeta.contextWarning = `Auto-forwarded the transcript for session ${source.sessionId} (last activity ${source.ageSeconds}s ago). If this is running inside a subagent, that is the PARENT conversation, not your own work - discard this answer and re-run with --context <file>.`;
+    }
+    return invoke({
+      cfg,
+      verb: 'advise',
+      repo,
+      model: pickModel('advise'),
+      packetBody: body,
+      timeoutSeconds,
+      extraMeta,
+    });
+  }
+
+  if (verb === 'consult') {
+    const packetFile = args.packet;
+    if (!packetFile || packetFile === true) fail('consult requires --packet <file>');
+    if (!existsSync(packetFile)) fail(`packet file not found: ${packetFile}`);
+    const body = [readPrompt('consult'), '', '---', '', readFileSync(packetFile, 'utf8'), ''].join('\n');
+    return invoke({ cfg, verb: 'consult', repo, model: pickModel('consult'), packetBody: body, timeoutSeconds });
+  }
+
+  if (verb === 'resume') {
+    const session = args.session;
+    const message = args.message;
+    if (!session || session === true) fail('resume requires --session <id>');
+    if (!message || message === true) fail('resume requires --message <text>');
+    // No model unless explicitly given: a resumed session keeps the model it started with, so
+    // defaulting here would silently answer a Codex review follow-up with the consult model.
+    return invoke({
+      cfg,
+      verb: 'resume',
+      repo,
+      model: args.model && args.model !== true ? args.model : null,
+      packetBody: `${message}\n`,
+      timeoutSeconds,
+      resume: session,
+    });
+  }
+
+  fail(`unknown verb "${verb || ''}". Expected: advise | review | consult | resume | doctor | models | sync-labels`);
+}
+
+main().catch((e) => {
+  if (e instanceof Reported) return;
+  process.stdout.write(JSON.stringify({ ok: false, error: e.stack || String(e) }, null, 2) + '\n');
+  process.exitCode = 1;
+});

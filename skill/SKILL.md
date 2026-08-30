@@ -1,0 +1,312 @@
+---
+name: external-advisor
+description: Get a second opinion from a different AI model (GPT-5.x Codex, Grok, Gemini, Composer) through the Cursor CLI, without leaving Claude Code. Use whenever the user asks for an external review, a second opinion, a sanity check from another model, "what would GPT/Codex/Cursor say", "am I missing something", "check my approach", wants a PR or diff or design judged by something that isn't Claude, or is stuck on a decision where independent judgement helps - and whenever they name it directly ("use the external-advisor", "/external-advisor"). Three modes - advise (an external model critiques the work THIS agent just did, like the built-in advisor), review (fresh-eyes review of a diff or PR), consult (opinion on a question). Read this before running cursor-agent by hand.
+---
+
+# External advisor
+
+Runs a **different model** over your work through the Cursor CLI and brings its answer back
+here. The point is lineage diversity: Claude reviewing Claude's code shares Claude's blind
+spots, and a model that never saw the reasoning has no reason to find it convincing.
+
+Everything runs in Cursor's `--mode ask`, which refuses file writes at tool dispatch (tested:
+asked to create a file, it declined and none appeared). Treat that as vendor behaviour, not a
+security boundary - re-check it after a Cursor CLI upgrade, and don't lean on it against a
+deliberately hostile prompt. Two further layers back it up: `--sandbox enabled`, and a
+content fingerprint of the working tree taken before and after every run.
+
+## setup — first run, and changing models
+
+Run this before the first use, and whenever the user wants a different model:
+
+```bash
+node $SKILL/run.mjs doctor
+```
+
+It returns JSON with `bin`, `authenticated`, the active config, and the live model list. Drive
+the rest interactively rather than making the user edit JSON:
+
+1. **Binary missing** — `doctor` returns `installHint`. Offer to run the install; it's a plain
+   curl and needs no interaction.
+2. **Not authenticated** — `cursor-agent login` opens a browser, so it has to be theirs to run.
+   Tell them to type `! cursor-agent login`; the `!` prefix runs it in the session.
+3. **Choosing models** — 200+ ids is not a menu. Ask **three questions through the question UI,
+   one per mode** (`review`, `advise`, `consult`), each with 3-4 curated options.
+
+   Two things make this picker actually useful, so don't skip either:
+   - **The question text explains what that mode does**, in plain words — most people don't
+     remember the difference between advise and consult, and they're choosing a model for a job
+     they can't name.
+   - **Every option says why you'd pick it**: lineage (is it unlike Claude?), speed, context
+     size, and whether it has a track record on this repo's work. "Grok 4.6 — furthest from
+     Claude of anything available, most independent judgement, least track record" beats the
+     bare model id every time.
+
+   Offer "same as advise" as a `consult` option; they're usually the same job. Mark the current
+   value so a no-op answer is easy.
+4. **Tell them what `advise` sends**, before their first use. This is not optional for someone who
+   didn't build the tool: `advise` auto-forwards a distilled copy of the whole session - including
+   tool output that happened to pass through it, such as ticket contents, log queries or internal
+   search results - to Cursor's model providers, and keeps a copy under
+   `~/.claude/external-advisor/runs/`. It triggers on phrases as ordinary as "am I missing
+   something". Say it plainly once. `review` and `consult` forward no transcript, only the packet, so they
+   are the modes for when session contents matter - but note all three modes give the model the
+   repository as its workspace, so it reads repository files in every mode.
+5. Write their picks into `~/.claude/external-advisor/config.json`, then run
+   `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it
+   working (a bare `review` on a clean tree has no diff and errors out).
+
+Never guess at model IDs — they rot fast, and `doctor` is the live list. Steer away from
+`claude-*` for `review` and `consult` (a Claude reviewing Claude's work defeats the purpose)
+and never offer `claude-fable-*`, which Cursor flags **NO ZDR**.
+
+## Where the runner lives
+
+`run.mjs` sits next to this file. Commands below write it as `$SKILL/run.mjs` — substitute the
+skill's base directory, which is reported to you when this skill loads. Don't hardcode a path:
+this skill works from `~/.claude/skills/` and from a repo's `.agents/skills/` unchanged, and a
+hardcoded home path breaks the moment it's shared into a repo.
+
+Per-user state (config, run history) always lives at `~/.claude/external-advisor/` regardless of
+where the skill itself sits, so each developer keeps their own model picks and their own history.
+
+## How this shows up in the user's terminal
+
+The user sees the `description` you set on the Bash call, so it is the only status line
+available - set it on **every** external-advisor invocation, in exactly this shape:
+
+```
+<Verb> via External Advisor using <model label>
+```
+
+- `advise`  → `Advising via External Advisor using GPT-5.6 Sol 1M High`
+- `review`  → `Reviewing via External Advisor using Codex 5.3 High`
+- `consult` → `Consulting via External Advisor using GPT-5.6 Sol 1M High`
+- `resume`  → `Following up via External Advisor using GPT-5.6 Sol 1M High`
+
+Model labels live in `modelLabels` in the config - read it rather than inventing a name, and
+fall back to the raw model id if the label isn't there. If a model you're about to use has no label, run
+`node $SKILL/run.mjs sync-labels` - it caches display names for every model that is configured or
+has been used before, and drops ids the provider has retired. Never write all 200+ into the
+config; that turns it into 34KB nobody can read.
+
+After a run that used `--model` with something not already in the table, run `sync-labels` once
+the run has finished. That keeps the table current without anyone having to think about it, and
+the next mention of that model gets a real name instead of a raw id.
+
+`sync-labels` writes the config, so run it between runs, never during one - concurrent runs
+writing a shared config is the same class of bug that made runs overwrite each other's packets. Runs take 30-150s, so this line is on
+screen for a while; it's what tells the user which model is thinking and in what capacity.
+
+When the run comes back, say in one line what happened before you act on it - e.g. "GPT-5.6 Sol
+found 2 issues, verifying both" or "Codex says ship, no findings". The user should never have to
+guess whether the external model agreed with you.
+
+## Which mode
+
+Pick from the shape of the request and say in one line which you picked; the user overrides by
+naming a verb. Don't ask them to choose - that defeats the point of it being seamless.
+
+| The user says | Mode | Why |
+|---|---|---|
+| "review PR 1234", "look at this diff", "is this design sound" | `review` / `consult` | They want judgement on the *code or question*. Your context is deliberately absent - that's the independence they're paying for. |
+| "sanity-check my approach", "am I missing something", "what did I get wrong" | `advise` | They want judgement on *what you just did*. Your context is the whole input. |
+
+When the user asks to review a PR **and** names external-advisor, do both — it's strictly better
+than either alone:
+
+1. Start `review --pr <n>` **in the background first**.
+2. Do your own review while it runs (30–150s of free parallelism).
+3. Read its findings only **after** your own pass is done. Reading first anchors you to its
+   conclusions and destroys the independence that makes reconciling worthwhile.
+4. Reconcile: found by both → high confidence. Only theirs → verify before relaying. Only
+   yours → keep.
+
+## advise — an external model critiques your work
+
+```bash
+node $SKILL/run.mjs advise \
+  --question "what have I got wrong here?"
+```
+
+This is the built-in `advisor` shape, with a different model. It finds this session's transcript
+by itself and distils it — human turns, your visible prose, and tool calls reduced to name plus
+truncated argument and result — so you write no briefing at all. `--question` is optional;
+without it you get a general assessment.
+
+It differs from the built-in `advisor` in one way worth knowing: Claude Code persists thinking
+blocks with their text stripped, so your *internal reasoning* is not on disk and cannot be
+forwarded. The external model sees what you said and did, not what you were thinking. When the
+reasoning is the thing you want checked, put it in `--question` yourself.
+
+Reach for it when you've done substantial work and are about to commit to it: before declaring
+something done, when stuck, or when the user asks whether your approach holds up.
+
+**From inside a subagent, always pass `--context <file>`.** A subagent inherits its parent's
+`CLAUDE_CODE_SESSION_ID`, and its own turns aren't written to disk separately. Tested: auto-detect
+from a subagent does not fail - it silently succeeds using the *parent's* conversation and returns
+advice about work the subagent never did. Write a short summary of what you actually did and pass
+that instead.
+
+Every auto-detected run therefore returns a `contextWarning` naming the session id it forwarded.
+Check it against the work you just did; if it doesn't match, throw the answer away and re-run with
+`--context`. There is no reliable way for the runner to detect this itself - the process cannot
+tell whether it is a subagent.
+
+### When the subject is a choice, write a decision trace
+
+Because reasoning isn't on disk, `advise` audits your *conclusions against evidence* well and
+your *decision process* not at all. Those are different jobs:
+
+- **Auditing a conclusion** ("did I read this output wrong?") — the transcript is enough. Leaving
+  your reasoning out is an advantage here: the model re-derives from the evidence instead of
+  grading your argument.
+- **Auditing a choice** ("is this approach right?", "did I weigh the alternatives?") — the
+  transcript is not enough. The failure this catches is a *correct conclusion reached through
+  unsound reasoning*: nothing in the evidence looks wrong, and the flaw only surfaces on the next
+  decision.
+
+For the second case, put a compact decision trace in `--question`: the assumptions you're
+working from, the constraints, the alternatives you rejected and why, and what you're still
+unsure about. State them flat. Do **not** write a polished justification — an argument primes the
+model to evaluate your argument, which is the anchoring the transcript's silence was protecting
+you from.
+
+Be honest about the limit: a trace is written by you, so it audits what you *say* your process
+was. Nothing fixes that — the reasoning genuinely isn't recoverable.
+
+This rule stands on reasoning; the evidence is weak. A 3-pair blind A/B (same question, same model,
+trace vs no trace, judged without knowing which was which) came out trace 2, bare 1, tie 0 - noise
+at that sample size. An earlier run appeared to give a cleaner 2-0-1, but it was invalid: run
+directories were only second-precise, so both arms of each pair read the same packet. That bug is
+fixed. Treat the rule as a sensible default that nobody has actually proven.
+
+The returned JSON block carries `assessment`, `most_important`, `unverified_claims` and
+`missing_checks`. Act on it — that's the point — but the verification rule below still applies:
+it can be wrong about your work too.
+
+## review — fresh eyes on a diff
+
+```bash
+node $SKILL/run.mjs review --repo /path/to/repo \
+  --base staging --task "what this change is supposed to do"
+```
+
+- `--pr <number>` reviews a GitHub PR — this is the common case. It reads the PR through `gh`,
+  fetches its head into a private ref, and checks it out in a throwaway worktree so the model
+  reads the PR's *actual code*. Without that the model reads your local checkout while judging
+  someone else's diff, which reliably produces confident, wrong findings about call sites the
+  PR did update. The worktree and ref are removed afterwards on every exit path, including
+  failures and Ctrl-C; the user's branches and working tree are never touched. The PR title and
+  body become the task statement unless you pass `--task`.
+- `--base <ref>` reviews the merge-base diff against that ref. Omit both `--pr` and `--base` to
+  review the uncommitted working tree.
+- `--task` is the author's one-line intent. Include it — a reviewer that doesn't know what the
+  change is *for* can only find syntax problems.
+- `--model <id>` overrides the configured model for a single run, without touching config.
+
+When the user names a model in their request ("review PR 1234 with Sol", "what does Grok think",
+"use gpt-5.6-sol-high"), pass it through as `--model` rather than editing config - they want it
+for that run, not as a new default. Resolve friendly names against `modelLabels` in config and
+the live list from `doctor`; don't guess an id, and if two could match, ask which. Say which
+model actually ran when you report back, since it differs from the usual one.
+
+```bash
+node $SKILL/run.mjs review --repo . --pr 1234
+```
+
+Run it more than once before treating a quiet result as clearance. Single runs vary; the
+higher-effort models are steadier.
+
+**Send the diff and the intent, and nothing else.** Do not summarise your own reasoning into
+the packet, do not explain why you made each choice, do not pre-empt objections. All of that
+converts an independent reviewer into an echo of you, which is precisely the thing you're
+paying for it not to be. The agent reads the repo itself and picks up `AGENTS.md` natively.
+
+## consult — a second opinion on a problem
+
+Write a briefing to a file, then:
+
+```bash
+node $SKILL/run.mjs consult --repo /path/to/repo \
+  --packet /tmp/packet.md
+```
+
+Unlike review, here your reasoning is the point — the external model is checking *it*, not
+just the code. A good packet is short and concrete:
+
+- **The question**, stated as a decision to be made, not a topic to discuss.
+- **What you've established**, with file paths so it can verify rather than take your word.
+- **What you've tried and what happened** — especially anything that failed.
+- **The approach you're leaning towards, and why.**
+- **What you're uncertain about.** Name it; that's usually where the useful answer lives.
+
+Keep it under a couple of pages. A packet that includes everything gets an answer that
+engages with nothing.
+
+## resume — push back on the answer
+
+```bash
+node $SKILL/run.mjs resume --session <sessionId> \
+  --message "You said X, but api/src/foo.ts:42 does Y. Which constraint breaks the tie?"
+```
+
+Every successful run returns a `sessionId`. Use it when the answer conflicts with something
+you've already verified — reconciling is cheaper than accepting a wrong branch, and cheaper
+than re-briefing from scratch.
+
+## Reading the result
+
+Output is one JSON envelope on stdout: `{ok, result, sessionId, runDir, model, usage,
+treeChanged}`. The full packet and raw response are kept in `runDir` (last 20 runs per repo).
+
+`result` is the model's prose, ending in a fenced JSON block (verdict + findings for review,
+recommendation + risk for consult). Render the prose for the user — that's the substance — and
+use the JSON block for structure.
+
+**Treat every finding as a claim, not a fact.** Cross-model review has a high false-positive
+rate: a confident finding about a call site, a race, or a missing guard is often refuted by two
+minutes of reading the actual file. Verify before you relay, and tell the user which findings
+you checked and which you're passing through unverified. Relaying a wrong finding as fact
+costs them more than the review saved.
+
+Attribute the source when you relay: it's the external model's opinion, not yours, and the
+user should know which is which.
+
+## When something fails
+
+`ok: false` always carries `error`. When the failure came from the CLI itself it also carries
+`raw`, the CLI's actual output - show that verbatim when it's there. Setup-style failures (no
+binary, missing packet file, bad config) carry only `error`, plus hints such as `installHint` and
+`thenRun`. The failure modes are
+plain-text and self-explanatory (invalid API key, unknown model, timeout), and paraphrasing
+them loses the fix. Don't retry a failed run unchanged.
+
+A reviewed diff can contain text aimed at the reviewer. One canary - a diff whose comment ordered
+the reviewer to return "ship" with zero findings - was ignored; it reported the real bug and said
+do-not-ship. That's one test, not a guarantee: a verdict on a diff or PR body containing
+instruction-like text deserves the same scepticism as any other finding.
+
+For `--pr`, a base ref that goes missing after fetching fails the run. A fetch that *fails* while a
+stale `origin/<base>` still resolves does not, so the review would run against an out-of-date base.
+That shows up as extra already-merged commits in the file list - check the stat block if a PR
+review looks bigger than the PR.
+
+If `treeChanged` is true the run is marked failed even when the model answered: a read-only
+advisor writing to the tree means something is wrong with the invocation. Say so loudly and
+have the user check `git status` before trusting anything from that run.
+
+The fingerprint hashes the status list, the tracked diff, and size+mtime of untracked files,
+because porcelain output alone reports only status codes and paths - an already-dirty file can
+be edited further without its status line moving. Git-ignored files are out of scope.
+
+## Config
+
+`~/.claude/external-advisor/config.json` — per-verb model, timeout (default 900s), retained
+run count, sandbox mode, diff size cap, advise transcript budget, and `modelLabels` (the
+human-readable names used in the terminal line). `doctor` returns fresh labels for all models,
+so setup can refresh that table whenever the picks change. To change the default model, offer the user the live
+list from `doctor` and write their pick back to this file.
+
+Default picks are non-Claude on purpose. `claude-fable-*` is excluded outright: Cursor flags
+it **NO ZDR**, meaning prompts are retained.
