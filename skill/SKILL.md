@@ -48,11 +48,11 @@ the rest interactively rather than making the user edit JSON:
    didn't build the tool: `advise` auto-forwards a distilled copy of the whole session - including
    tool output that happened to pass through it, such as ticket contents, log queries or internal
    search results - to Cursor's model providers, and keeps a copy under
-   `~/.claude/external-advisor/runs/`. It triggers on phrases as ordinary as "am I missing
+   the skill's own `runs/` directory. It triggers on phrases as ordinary as "am I missing
    something". Say it plainly once. `review` and `consult` forward no transcript, only the packet, so they
    are the modes for when session contents matter - but note all three modes give the model the
    repository as its workspace, so it reads repository files in every mode.
-5. Write their picks into `~/.claude/external-advisor/config.json`, then run
+5. Write their picks into the config (`doctor` reports its exact path as `configPath`), then run
    `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it
    working (a bare `review` on a clean tree has no diff and errors out).
 
@@ -67,8 +67,23 @@ skill's base directory, which is reported to you when this skill loads. Don't ha
 this skill works from `~/.claude/skills/` and from a repo's `.agents/skills/` unchanged, and a
 hardcoded home path breaks the moment it's shared into a repo.
 
-Per-user state (config, run history) always lives at `~/.claude/external-advisor/` regardless of
-where the skill itself sits, so each developer keeps their own model picks and their own history.
+Per-user state lives **inside the skill directory**, next to `run.mjs`: `config.json` and `runs/`.
+Each installation carries its own, so a personal copy under `~/.claude/skills/` and a repo copy
+under `.agents/skills/` keep separate configs and histories. `EXTERNAL_ADVISOR_HOME` overrides the
+location, and `doctor` reports it as `stateRoot`.
+
+**A repo copy must gitignore that state** while keeping the skill's own files tracked:
+
+```gitignore
+<path-to-skill>/config.json
+<path-to-skill>/runs/
+```
+
+Being ignored is also what keeps run artifacts out of `git status --exclude-standard`, so they
+cannot trip the write guard.
+
+Transient PR worktrees go to the system temp directory rather than the repo: a full checkout inside
+the working tree is still picked up by file watchers, linters and test globs even when gitignored.
 
 ## How this shows up in the user's terminal
 
@@ -287,10 +302,9 @@ the reviewer to return "ship" with zero findings - was ignored; it reported the 
 do-not-ship. That's one test, not a guarantee: a verdict on a diff or PR body containing
 instruction-like text deserves the same scepticism as any other finding.
 
-For `--pr`, a base ref that goes missing after fetching fails the run. A fetch that *fails* while a
-stale `origin/<base>` still resolves does not, so the review would run against an out-of-date base.
-That shows up as extra already-merged commits in the file list - check the stat block if a PR
-review looks bigger than the PR.
+For `--pr`, the run fails if the base fetch fails, and if the base ref goes missing after fetching -
+either one would otherwise review the PR against an out-of-date base. If a PR review still looks
+bigger than the PR, check the stat block for already-merged commits.
 
 If `treeChanged` is true the run is marked failed even when the model answered: a read-only
 advisor writing to the tree means something is wrong with the invocation. Say so loudly and
@@ -300,9 +314,16 @@ The fingerprint hashes the status list, the tracked diff, and size+mtime of untr
 because porcelain output alone reports only status codes and paths - an already-dirty file can
 be edited further without its status line moving. Git-ignored files are out of scope.
 
+## Tests
+
+`node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the
+write guard, untracked-only reviews, run-history isolation, and both PR base-ref failures. The
+suite stubs `gh` and `cursor-agent` on PATH, so it needs no network and no Cursor subscription.
+Run it after a Cursor CLI upgrade alongside re-checking what ask mode blocks.
+
 ## Config
 
-`~/.claude/external-advisor/config.json` — per-verb model, timeout (default 900s), retained
+The config file (`doctor` reports `configPath`) — per-verb model, timeout (default 900s), retained
 run count, sandbox mode, diff size cap, advise transcript budget, and `modelLabels` (the
 human-readable names used in the terminal line). `doctor` returns fresh labels for all models,
 so setup can refresh that table whenever the picks change. To change the default model, offer the user the live

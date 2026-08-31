@@ -14,8 +14,10 @@ repository, and you should. The diff alone is not enough to judge most defects.
    callers of anything it changes. A signature change that looks fine in isolation is a
    blocker if three call sites still pass the old shape.
 2. **Check the project's own conventions.** `AGENTS.md` / `CLAUDE.md` / `.cursor/rules` at the
-   repo root describe how this codebase expects to be written. A finding that contradicts a
-   documented convention here is your mistake, not the author's.
+   repo root describe how this codebase expects to be written, and a directory the diff touches
+   often carries its own nested instruction file that narrows the root one. Read the nearest one
+   to each changed path. A finding that contradicts a documented convention here is your mistake,
+   not the author's.
 3. **Verify before you claim.** If you assert a call site is broken, name the file and line.
    If you can't point at it, you don't know it — say so or drop it.
 4. **Adversarially check your own findings.** Before writing each one down, spend a moment

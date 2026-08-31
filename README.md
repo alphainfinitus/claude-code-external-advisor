@@ -44,8 +44,8 @@ cursor-agent login
 ```
 
 To give it to a whole team instead, commit the same directory into your repo's `.agents/skills/`
-or `.claude/skills/`. Per-user state stays in `~/.claude/external-advisor/`, so everyone keeps
-their own model picks and history.
+or `.claude/skills/`, and gitignore its `config.json` and `runs/` so everyone keeps their own
+model picks and history.
 
 ## Quick start
 
@@ -71,11 +71,22 @@ Naming a model in the request overrides the configured one for that run.
 
 ## Configuration
 
-`~/.claude/external-advisor/config.json`:
+State lives inside the skill directory, next to `run.mjs`: `config.json` and `runs/`. Each
+installation keeps its own, so a personal copy and a repo copy do not share configs. Set
+`EXTERNAL_ADVISOR_HOME` to override, and run `doctor` to see the resolved path.
+
+If you vendor the skill into a repo, gitignore its state while keeping its files tracked:
+
+```gitignore
+<path-to-skill>/config.json
+<path-to-skill>/runs/
+```
+
+The config file in that directory:
 
 | Key | Meaning |
 |---|---|
-| `models.review` / `.advise` / `.consult` | Model per mode. A code-specialised model suits review; advise and consult want reasoning and a large context window. |
+| `models.review` / `.advise` / `.consult` | Model per mode. All three default to a large-context reasoning model. A code-specialised model is a reasonable alternative for `review` if you prefer speed over depth. |
 | `timeoutSeconds` | Hard kill for a run. Default 900. |
 | `keepRuns` | Run folders kept per repository. Default 20. |
 | `sandbox` | `enabled` or `disabled`. |
@@ -121,13 +132,12 @@ including any tool output that passed through it, and keeps a copy on disk. Tell
 before they use it. `review` and `consult` forward no transcript, only the packet you or the
 skill composed, so those are the modes to use when session contents matter.
 
-Packets and raw responses are written to `~/.claude/external-advisor/runs/` and kept for the last
+Packets and raw responses are written to the state directory's `runs/` and kept for the last
 `keepRuns` runs per repository. They contain full diffs.
 
 ## Limitations
 
 - Ask mode is vendor behaviour, not a security boundary. Re-check it after a Cursor CLI upgrade.
-- A failed base fetch on `--pr`, where a stale `origin/<base>` still resolves, is not detected.
 - A write followed by a revert during a run is invisible to the fingerprint.
 - The guard also fires if you edit repo files while a run is in progress. Runs take 30 to 150
   seconds.

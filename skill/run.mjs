@@ -18,19 +18,30 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SKILL_DIR = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(homedir(), '.claude', 'external-advisor');
-const RUNS = join(ROOT, 'runs');
-const CONFIG_PATH = join(ROOT, 'config.json');
+
+// State lives inside the skill directory, next to run.mjs: each installation of the skill carries
+// its own config and run history, whether that is ~/.claude/skills/ or a repo's .agents/skills/.
+// The repo copy must gitignore config.json and runs/ - being ignored is also what keeps run
+// artifacts out of `git status --exclude-standard`, so they cannot trip our own write guard.
+let ROOT;
+let RUNS;
+let CONFIG_PATH;
+
+function resolveRoots() {
+  ROOT = process.env.EXTERNAL_ADVISOR_HOME || SKILL_DIR;
+  RUNS = join(ROOT, 'runs');
+  CONFIG_PATH = join(ROOT, 'config.json');
+}
 
 const DEFAULT_CONFIG = {
   provider: 'cursor',
   models: {
-    review: 'gpt-5.3-codex-high',
+    review: 'gpt-5.6-sol-high',
     advise: 'gpt-5.6-sol-high',
     consult: 'gpt-5.6-sol-high',
   },
@@ -104,14 +115,19 @@ function parseArgs(argv) {
   return out;
 }
 
+/** Runs git and throws on failure. For the few calls whose failure has to stop the run. */
+function gitStrict(repo, args) {
+  return execFileSync('git', args, {
+    cwd: repo,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
 function git(repo, args) {
   try {
-    return execFileSync('git', args, {
-      cwd: repo,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    return gitStrict(repo, args);
   } catch {
     return '';
   }
@@ -145,7 +161,7 @@ function treeFingerprint(repo) {
 }
 
 function slug(p) {
-  return p.replace(/^.*\//, '') + '-' + Buffer.from(p).toString('base64url').slice(-6);
+  return p.replace(/^.*\//, '') + '-' + createHash('sha256').update(p).digest('hex').slice(0, 8);
 }
 
 function stamp() {
@@ -222,10 +238,10 @@ function readPrompt(name) {
  * otherwise the uncommitted working-tree diff. Oversized diffs are truncated with an explicit
  * note listing what was dropped, so the reviewer is never silently reading a partial change.
  */
-function collectDiff(repo, base, maxBytes) {
+function collectDiff(repo, base, maxBytes, baseLabel) {
   let label, stat, diff;
   if (base) {
-    label = `${base}...HEAD (merge-base)`;
+    label = `${baseLabel || base}...HEAD (merge-base)`;
     stat = git(repo, ['diff', '--stat', `${base}...HEAD`]);
     diff = git(repo, ['diff', `${base}...HEAD`]);
   } else {
@@ -268,7 +284,10 @@ function oneLine(text, max) {
  * when over budget, and the count of dropped turns is reported rather than silently swallowed.
  */
 function distillTranscript(path, maxBytes) {
-  const stripReminders = (t) => String(t).replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+  const stripReminders = (t) =>
+    String(t)
+      .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+      .trim();
   const turns = [];
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     if (!line.trim()) continue;
@@ -326,25 +345,47 @@ function preparePr(repo, number) {
       }),
     );
   } catch (e) {
-    fail(`could not read PR #${number} via gh: ${String(e.stderr || e.message).trim().slice(0, 300)}`);
+    fail(
+      `could not read PR #${number} via gh: ${String(e.stderr || e.message)
+        .trim()
+        .slice(0, 300)}`,
+    );
   }
 
   const token = runId();
   const ref = `refs/external-advisor/pr-${number}-${token}`;
-  const worktree = join(ROOT, 'worktrees', `pr-${number}-${token}`);
-  const cleanupRef = () => git(repo, ['update-ref', '-d', ref]);
+  const baseRef = `refs/external-advisor/base-${number}-${token}`;
+  // Transient checkouts go to the system temp dir, never inside the repo: a full worktree under
+  // .agent-artifacts/ is gitignored but still visible to file watchers, linters and test globs.
+  const worktree = join(tmpdir(), 'external-advisor-worktrees', `pr-${number}-${token}`);
+  const cleanupRefs = () => {
+    git(repo, ['update-ref', '-d', ref]);
+    git(repo, ['update-ref', '-d', baseRef]);
+  };
   git(repo, ['fetch', '--quiet', '--force', 'origin', `pull/${number}/head:${ref}`]);
   if (!git(repo, ['rev-parse', '--verify', '--quiet', ref]).trim()) {
+    cleanupRefs();
     fail(`could not fetch pull/${number}/head from origin (is the PR from a fork with no head ref?)`);
   }
-  // git() swallows errors, so a failed base fetch would silently review against a stale
-  // origin/<base> and produce a plausible verdict on the wrong diff.
-  const baseRef = `origin/${meta.baseRefName}`;
-  git(repo, ['fetch', '--quiet', 'origin', meta.baseRefName]);
-  const afterBase = git(repo, ['rev-parse', '--verify', '--quiet', baseRef]).trim();
-  if (!afterBase) {
-    cleanupRef();
-    fail(`could not resolve ${baseRef} after fetching; refusing to review against a missing base`);
+  // The base goes into a ref this run owns rather than origin/<base>: a bare fetch only updates
+  // the remote-tracking ref when the remote's refspec covers that branch, so a single-branch clone
+  // fetches into FETCH_HEAD, exits 0, and leaves a pre-existing origin/<base> stale. An explicit
+  // destination always writes, and a failure to fetch fails the run instead of reviewing stale code.
+  try {
+    gitStrict(repo, ['fetch', '--quiet', '--force', 'origin', `${meta.baseRefName}:${baseRef}`]);
+  } catch (e) {
+    cleanupRefs();
+    fail(
+      `could not fetch ${meta.baseRefName} from origin; refusing to review against a possibly stale base: ${String(
+        e.stderr || e.message,
+      )
+        .trim()
+        .slice(0, 300)}`,
+    );
+  }
+  if (!git(repo, ['rev-parse', '--verify', '--quiet', baseRef]).trim()) {
+    cleanupRefs();
+    fail(`could not resolve ${meta.baseRefName} after fetching; refusing to review against a missing base`);
   }
 
   // Registering on 'exit' rather than a `finally` is what guarantees the worktree and ref are
@@ -355,7 +396,7 @@ function preparePr(repo, number) {
     if (cleaned) return;
     cleaned = true;
     git(repo, ['worktree', 'remove', '--force', worktree]);
-    git(repo, ['update-ref', '-d', ref]);
+    cleanupRefs();
     rmSync(worktree, { recursive: true, force: true });
     git(repo, ['worktree', 'prune']);
   };
@@ -367,7 +408,7 @@ function preparePr(repo, number) {
     });
   }
 
-  mkdirSync(join(ROOT, 'worktrees'), { recursive: true });
+  mkdirSync(dirname(worktree), { recursive: true });
   git(repo, ['worktree', 'add', '--detach', worktree, ref]);
   if (!existsSync(join(worktree, '.git'))) {
     cleanup();
@@ -379,7 +420,8 @@ function preparePr(repo, number) {
     cleanup,
     number: meta.number,
     headRef: meta.headRefName,
-    base: `origin/${meta.baseRefName}`,
+    base: baseRef,
+    baseLabel: `origin/${meta.baseRefName}`,
     title: meta.title,
     body:
       (meta.body || '').length > 4000
@@ -389,6 +431,12 @@ function preparePr(repo, number) {
 }
 
 async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSeconds, resume, extraMeta }) {
+  // Checked before the packet is written or the provider spawns: outside a repo both fingerprints
+  // are null, so the run would report `treeChanged: false` having verified nothing.
+  if (!isRepo(repo)) {
+    fail(`${repo} is not a git repository; the working-tree guard cannot run there`);
+  }
+
   // `repo` is the durable identity used for run history and the write guard; `workspace` is what
   // the agent actually reads, which for a PR review is a throwaway worktree. Keying history off
   // the worktree gave every PR run its own bucket, so keepRuns never pruned any of them.
@@ -419,8 +467,7 @@ async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSe
   const guardAfter = treeFingerprint(repo);
   const wsGuardAfter = ws === repo ? null : treeFingerprint(ws);
   const treeChanged =
-    (guardBefore !== null && guardBefore !== guardAfter) ||
-    (wsGuardBefore !== null && wsGuardBefore !== wsGuardAfter);
+    (guardBefore !== null && guardBefore !== guardAfter) || (wsGuardBefore !== null && wsGuardBefore !== wsGuardAfter);
 
   writeFileSync(join(runDir, 'response.json'), res.stdout || res.stderr || '');
 
@@ -504,9 +551,10 @@ async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSe
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const verb = args._[0];
+  const repo = resolve(args.repo || process.cwd());
+  resolveRoots();
   const cfg = loadConfig();
   const provider = PROVIDERS[cfg.provider];
-  const repo = resolve(args.repo || process.cwd());
   const timeoutSeconds = Number(args.timeout || cfg.timeoutSeconds);
 
   const pickModel = (kind) => (args.model && args.model !== true ? args.model : cfg.models[kind]);
@@ -520,7 +568,10 @@ async function main() {
       }
     })();
     if (!found) {
-      return fail(`${provider.bin} not found on PATH`, { installHint: provider.installHint, thenRun: provider.loginHint });
+      return fail(`${provider.bin} not found on PATH`, {
+        installHint: provider.installHint,
+        thenRun: provider.loginHint,
+      });
     }
     const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
     const authed = res.code === 0;
@@ -529,7 +580,14 @@ async function main() {
           .split('\n')
           .map((l) => l.trim())
           .filter((l) => l.includes(' - '))
-          .map((l) => [l.split(' - ')[0], l.split(' - ').slice(1).join(' - ').replace(/\s*\(current\)$/, '')])
+          .map((l) => [
+            l.split(' - ')[0],
+            l
+              .split(' - ')
+              .slice(1)
+              .join(' - ')
+              .replace(/\s*\(current\)$/, ''),
+          ])
       : [];
     const models = rows.map(([id]) => id);
     // Display names are what the user sees in the terminal line, so setup can refresh the
@@ -543,6 +601,7 @@ async function main() {
           authenticated: authed,
           authHint: authed ? null : provider.loginHint,
           rawIfFailed: authed ? null : (res.stderr || res.stdout).trim().slice(0, 1000),
+          stateRoot: ROOT,
           configPath: CONFIG_PATH,
           configExists: existsSync(CONFIG_PATH),
           config: cfg,
@@ -569,7 +628,14 @@ async function main() {
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => l.includes(' - '))
-        .map((l) => [l.split(' - ')[0], l.split(' - ').slice(1).join(' - ').replace(/\s*\(current\)$/, '')]),
+        .map((l) => [
+          l.split(' - ')[0],
+          l
+            .split(' - ')
+            .slice(1)
+            .join(' - ')
+            .replace(/\s*\(current\)$/, ''),
+        ]),
     );
 
     const used = new Set(Object.values(cfg.models));
@@ -593,7 +659,13 @@ async function main() {
     writeFileSync(CONFIG_PATH, `${JSON.stringify(onDisk, null, 2)}\n`);
     process.stdout.write(
       JSON.stringify(
-        { ok: true, configPath: CONFIG_PATH, labelCount: Object.keys(labels).length, added: Object.keys(labels).filter((k) => !(k in existing)), labels },
+        {
+          ok: true,
+          configPath: CONFIG_PATH,
+          labelCount: Object.keys(labels).length,
+          added: Object.keys(labels).filter((k) => !(k in existing)),
+          labels,
+        },
         null,
         2,
       ) + '\n',
@@ -622,8 +694,11 @@ async function main() {
         reviewRoot,
         pr ? pr.base : args.base === true ? null : args.base,
         cfg.maxDiffBytes,
+        pr ? pr.baseLabel : null,
       );
-      if (!diff.trim()) {
+      // Untracked files carry the change when a branch only adds files, which is the normal
+      // shape of work that has not been committed yet.
+      if (!diff.trim() && !untracked.trim()) {
         const def =
           git(repo, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).trim().replace('origin/', '') || 'main';
         return fail(`no diff found for ${label}. Pass --base <ref> (this repo's default branch looks like "${def}").`);
@@ -657,14 +732,16 @@ async function main() {
         '```',
         stat.trim() || '(none)',
         '```',
-        untracked ? `\n## Untracked files (not in the diff below)\n\n\`\`\`\n${untracked}\n\`\`\`` : '',
+        untracked
+          ? `\n## Untracked files (new files - their contents are not in the diff, open them in the workspace)\n\n\`\`\`\n${untracked}\n\`\`\``
+          : '',
         truncated ? `\n> **Truncation notice:** ${truncated}` : '',
         '',
         '## Diff',
         '',
-        '```diff',
-        diff,
-        '```',
+        ...(diff.trim()
+          ? ['```diff', diff, '```']
+          : ['(No tracked changes. The whole change is the untracked files listed above - read them.)']),
         '',
       ].join('\n');
       return await invoke({
@@ -680,7 +757,6 @@ async function main() {
       if (pr) pr.cleanup();
     }
   }
-
 
   if (verb === 'advise') {
     let story;
