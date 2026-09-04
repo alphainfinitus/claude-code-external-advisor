@@ -242,7 +242,9 @@ function configErrors(cfg) {
   // nothing at all. That is the same half-read failure the provider check exists to stop.
   if (typeof cfg.sandbox !== 'boolean') errs.push('sandbox must be true or false; run setup');
   for (const [job, value] of Object.entries(cfg.models || {})) {
-    if (typeof value !== 'string' || !value.includes('/')) {
+    // Both halves are required. "cursor/" parses as a model of '', which would reach the CLI with
+    // no --model at all and silently run whatever that CLI defaults to.
+    if (typeof value !== 'string' || !value.includes('/') || !value.slice(value.indexOf('/') + 1)) {
       errs.push(`models.${job} must be "<provider>/<model>"; run setup`);
       continue;
     }
@@ -255,9 +257,10 @@ function configErrors(cfg) {
 /** Splits "<provider>/<model>" on the first slash. `where` names the source in the error. */
 function splitModel(value, where) {
   const i = value.indexOf('/');
-  if (i < 0) fail(`${where} must be "<provider>/<model>"; run setup`);
+  const model = i < 0 ? '' : value.slice(i + 1);
+  // An empty model half is as wrong as a missing slash: it would run the CLI's default model.
+  if (i < 0 || !model) fail(`${where} must be "<provider>/<model>"; run setup`);
   const provider = value.slice(0, i);
-  const model = value.slice(i + 1);
   if (!Object.hasOwn(PROVIDERS, provider)) fail(`unknown provider "${provider}" in ${where}`);
   return { provider, model };
 }

@@ -302,6 +302,31 @@ describe('config resolution', () => {
     assert.equal(out.error, 'models.consult must be "<provider>/<model>"; run setup');
   });
 
+  it('rejects a model with an empty model half', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'cursor/' } });
+    const repo = initRepo(tmp('cfg'));
+    commit(repo, 'f.txt', 'x\n', 'init');
+    writeFileSync(join(repo, 'q.md'), 'question');
+    const bin = stubBin({ 'cursor-agent': AGENT_OK });
+
+    const out = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md')], { home, bin });
+
+    assert.equal(out.ok, false);
+    // An empty half would otherwise fall through to the CLI's own default model.
+    assert.equal(out.error, 'models.review must be "<provider>/<model>"; run setup');
+
+    // The same rule applies to the flag, which is parsed by splitModel rather than configErrors.
+    writeConfig(home, CURSOR_MODELS);
+    const flag = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md'), '--model', 'cursor/'], {
+      home,
+      bin,
+    });
+
+    assert.equal(flag.ok, false);
+    assert.equal(flag.error, '--model must be "<provider>/<model>"; run setup');
+  });
+
   it('rejects a provider that is not in the table', () => {
     const home = tmp('home');
     writeConfig(home, { models: { consult: 'nope/x' } });
