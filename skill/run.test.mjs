@@ -494,3 +494,57 @@ describe('agy resume', () => {
     );
   });
 });
+
+describe('multi-provider reporting', () => {
+  it('surfaces the agy tool-permission warning from doctor', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'agy/gemini-3.1-pro-high' } });
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub() });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    assert.equal(out.ok, true);
+    assert.equal(out.providers.agy.readOnly, '--mode plan');
+    assert.equal(out.providers.agy.readOnlyStrength, 'prompt');
+    assert.equal(
+      out.providers.agy.warnings[0],
+      'toolPermission is "always-proceed": agy will auto-approve tool calls in headless runs; plan mode is the only guard',
+    );
+    assert.deepEqual(out.providers.cursor.warnings, []);
+  });
+
+  it('keeps the labels of a provider whose model list cannot be read', () => {
+    const home = tmp('home');
+    writeConfig(home, {
+      models: { review: 'agy/gemini-3.1-pro-high', consult: 'cursor/gpt-5.6-sol-high' },
+      modelLabels: { cursor: { 'gpt-5.6-sol-high': 'OLD LABEL' } },
+    });
+    const bin = stubBin({ 'cursor-agent': cursorStub({ listFails: true }), agy: agyStub() });
+
+    const out = runCli(['sync-labels'], { home, bin });
+
+    assert.deepEqual(out.skipped, ['cursor']);
+    assert.equal(out.labels.cursor['gpt-5.6-sol-high'], 'OLD LABEL');
+    assert.equal(out.labels.agy['gemini-3.1-pro-high'], 'Gemini 3.1 Pro (High)');
+    const onDisk = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'));
+    assert.equal(onDisk.modelLabels.cursor['gpt-5.6-sol-high'], 'OLD LABEL');
+  });
+
+  it('never makes an agent call to a signed-out provider', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'agy/gemini-3.1-pro-high' } });
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub({ argvLog: log, signedOut: true }) });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.providers.agy.authenticated, false);
+    assert.equal(out.providers.agy.error, 'agy is not signed in');
+    assert.deepEqual(out.providers.agy.warnings, []);
+    // On a signed-out agy, `-p` blocks for 60 seconds on the sign-in prompt, so warnings must
+    // run only after listModels reports signed in. The stub logs `-p` calls and nothing else,
+    // so a missing log file proves doctor made no agent call.
+    assert.equal(existsSync(log), false, 'doctor must not spawn an agent turn on a signed-out provider');
+  });
+});

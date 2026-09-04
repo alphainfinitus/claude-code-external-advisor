@@ -826,6 +826,7 @@ async function doctorReport(cfg, repo) {
       modelCount: 0,
       models: [],
       modelLabels: {},
+      warnings: [],
     };
     if (!found) {
       entry.error = `${p.bin} not found on PATH`;
@@ -840,6 +841,12 @@ async function doctorReport(cfg, repo) {
       entry.modelCount = list.models.length;
       entry.models = list.models.map(([id]) => id);
       entry.modelLabels = Object.fromEntries(list.models);
+      // Only probed once signed in: the probe is an agent call, and an unauthenticated one
+      // blocks on the sign-in prompt.
+      if (p.warnings) {
+        const w = await p.warnings(providerRunner(p, repo));
+        if (w) entry.warnings.push(w);
+      }
     } else {
       entry.error = `${p.bin} is not signed in`;
       entry.installHint = p.installHint;
@@ -866,18 +873,23 @@ async function doctorReport(cfg, repo) {
 
 /**
  * Setup-time only. Refreshes display names for the models each configured provider still offers,
- * keyed by provider then model id. A provider whose list call fails is left untouched rather than
- * emptied. Never run during a run: two processes writing config is the same class of bug that
- * made runs overwrite each other's packets.
+ * keyed by provider then model id. A provider whose list call fails is skipped: its existing
+ * sub-table is left untouched and its name is reported, so a signed-out CLI never wipes labels.
+ * Never run during a run: two processes writing config is the same class of bug that made runs
+ * overwrite each other's packets.
  */
 async function syncLabels(cfg, repo) {
   const names = configuredProviders(cfg);
   const onDisk = existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) : {};
   const labels = { ...(onDisk.modelLabels || {}) };
+  const skipped = [];
   for (const name of names) {
     const p = PROVIDERS[name];
     const list = await p.listModels(providerRunner(p, repo));
-    if (!list.ok) continue;
+    if (!list.ok) {
+      skipped.push(name);
+      continue;
+    }
     const live = Object.fromEntries(list.models);
     const used = new Set();
     for (const value of Object.values(cfg.models || {})) {
@@ -891,7 +903,7 @@ async function syncLabels(cfg, repo) {
   }
   onDisk.modelLabels = labels;
   writeFileSync(CONFIG_PATH, `${JSON.stringify(onDisk, null, 2)}\n`);
-  return { ok: true, configPath: CONFIG_PATH, providers: names, labels };
+  return { ok: true, configPath: CONFIG_PATH, providers: names, skipped, labels };
 }
 
 async function main() {
