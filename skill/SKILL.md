@@ -307,9 +307,10 @@ you've already verified — reconciling is cheaper than accepting a wrong branch
 than re-briefing from scratch.
 
 A session id is only valid on the CLI that issued it. The runner looks the provider up from the
-original run's saved metadata, so you pass only `--session` and `--message`. If the provider comes
-back with a different conversation id than the one you asked for, the run fails instead of
-answering from a fresh conversation.
+original run's saved metadata, so you pass only `--session` and `--message`.
+
+On `agy`, if the reply carries a different conversation id than the one you asked for, the run
+fails instead of answering from a fresh conversation. Cursor has no such check.
 
 ## Reading the result
 
