@@ -47,33 +47,71 @@ const DEFAULT_CONFIG = {
 };
 
 /**
- * Provider adapters. `args` must produce a read-only invocation: for cursor-agent that is
- * `--mode ask` (verified to refuse writes), not `-p` alone, which still carries write and
- * shell tools. `--trust` is required or headless runs block on the workspace-trust prompt.
+ * Provider adapters. This table is the only place that knows a CLI's flags or output format.
+ * `buildArgs` must produce a read-only invocation, and it returns the FULL argv including the
+ * prompt, because the CLIs disagree about where the prompt goes. `readOnlyStrength` says how
+ * strong that guard is: "dispatch" means the CLI refuses the tool call, "prompt" means the model
+ * is only told not to write. `parse` returns the normalized {ok, text, sessionId, usage, error},
+ * so nothing downstream knows which CLI ran.
  */
 const PROVIDERS = {
   cursor: {
     bin: 'cursor-agent',
     installHint: 'curl https://cursor.com/install -fsS | bash',
     loginHint: 'cursor-agent login  (opens a browser; the user must run this themselves)',
-    buildArgs({ model, workspace, addDir, sandbox, resume }) {
+    readOnly: '--mode ask',
+    readOnlyStrength: 'dispatch',
+    // `--mode ask` is verified to refuse writes; `-p` alone still carries write and shell tools.
+    // `--trust` is required or headless runs block on the workspace-trust prompt.
+    buildArgs({ model, workspace, addDir, sandbox, resume, prompt }) {
       const a = ['-p', '--mode', 'ask', '--trust', '--output-format', 'json'];
       if (workspace) a.push('--workspace', workspace);
       a.push('--sandbox', sandbox ? 'enabled' : 'disabled');
       if (model) a.push('--model', model);
       if (addDir) a.push('--add-dir', addDir);
       if (resume) a.push('--resume', resume);
+      // cursor-agent takes the prompt as the last positional argument.
+      if (prompt) a.push(prompt);
       return a;
+    },
+    // Also the auth probe: not logged in exits non-zero. Lines read `id - Label (current)`.
+    async listModels(run) {
+      const res = await run(['--list-models']);
+      if (res.code !== 0) return { ok: false, models: [], raw: (res.stderr || res.stdout).trim() };
+      const models = res.stdout
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.includes(' - '))
+        .map((l) => [
+          l.split(' - ')[0],
+          l
+            .split(' - ')
+            .slice(1)
+            .join(' - ')
+            .replace(/\s*\(current\)$/, ''),
+        ]);
+      return { ok: true, models, raw: res.stdout };
     },
     // Success emits one JSON object with type "result". Auth and model failures exit 1 with
     // plain text, so a parse failure is a real failure and the raw text is the only signal.
     parse(stdout) {
       const lines = stdout.trim().split('\n').filter(Boolean);
       for (let i = lines.length - 1; i >= 0; i--) {
+        let o;
         try {
-          const o = JSON.parse(lines[i]);
-          if (o && o.type === 'result') return o;
-        } catch {}
+          o = JSON.parse(lines[i]);
+        } catch {
+          continue;
+        }
+        if (o && o.type === 'result') {
+          return {
+            ok: !o.is_error,
+            text: o.result,
+            sessionId: o.session_id || null,
+            usage: o.usage || null,
+            error: o.is_error ? String(o.result || 'agent reported an error') : null,
+          };
+        }
       }
       return null;
     },
@@ -285,11 +323,15 @@ function pruneRuns(dir, keep) {
   for (const e of entries.slice(keep)) rmSync(e.p, { recursive: true, force: true });
 }
 
-/** Spawns the provider, enforcing a hard timeout: SIGTERM at the deadline, SIGKILL 5s later. */
-function runAgent(bin, args, prompt, cwd, timeoutSeconds) {
+/**
+ * Spawns the provider with exactly this argv, enforcing a hard timeout: SIGTERM at the deadline,
+ * SIGKILL 5s later. The prompt, if there is one, is already inside argv - the CLIs disagree
+ * about where it goes, so only the provider's buildArgs decides.
+ */
+function runAgent(bin, argv, cwd, timeoutSeconds) {
   return new Promise((resolveP) => {
     const started = Date.now();
-    const child = spawn(bin, [...args, prompt], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, argv, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -309,6 +351,52 @@ function runAgent(bin, args, prompt, cwd, timeoutSeconds) {
       resolveP({ code, stdout, stderr, timedOut, elapsedMs: Date.now() - started });
     });
   });
+}
+
+/** Absolute path of a binary on PATH, or '' when it is not there. */
+function whichBin(bin) {
+  try {
+    return execFileSync('/bin/sh', ['-c', `command -v ${bin}`], { encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The runner handed to a provider's listModels() and warnings(): same bin, same cwd, 60s cap.
+ * It takes a full argv, so those helpers place their own prompt the way their CLI needs it.
+ */
+function providerRunner(provider, cwd) {
+  return (argv) => runAgent(provider.bin, argv, cwd, 60);
+}
+
+/**
+ * Normalizes one provider run into the envelope the caller sees. Everything CLI-specific has
+ * already been flattened by provider.parse, so nothing here knows which CLI ran.
+ */
+function buildEnvelope(provider, res, timeoutSeconds) {
+  if (res.timedOut) {
+    return { ok: false, error: `timed out after ${timeoutSeconds}s`, raw: (res.stdout || res.stderr).slice(0, 4000) };
+  }
+  if (res.code !== 0) {
+    return {
+      ok: false,
+      error: `${provider.bin} exited ${res.code}`,
+      raw: (res.stderr || res.stdout).trim().slice(0, 4000),
+    };
+  }
+  const parsed = provider.parse(res.stdout);
+  if (!parsed) {
+    return {
+      ok: false,
+      error: 'output was not parseable JSON',
+      raw: (res.stdout || res.stderr).trim().slice(0, 4000),
+    };
+  }
+  if (!parsed.ok) {
+    return { ok: false, error: 'agent reported an error', raw: String(parsed.error || parsed.text || '').slice(0, 4000) };
+  }
+  return { ok: true, result: parsed.text, sessionId: parsed.sessionId, usage: parsed.usage || null };
 }
 
 function readPrompt(name) {
@@ -538,16 +626,18 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
   const guardBefore = treeFingerprint(repo);
   const wsGuardBefore = ws === repo ? null : treeFingerprint(ws);
 
-  const args = p.buildArgs({
+  // Nothing but the packet path goes on the command line; the provider decides where it sits.
+  const prompt = `Read the file ${packetPath} in full and follow its instructions exactly.`;
+  const argv = p.buildArgs({
     model,
     workspace: ws,
     addDir: runDir,
     sandbox: cfg.sandbox,
     resume,
     timeoutSeconds,
+    prompt,
   });
-  const prompt = `Read the file ${packetPath} in full and follow its instructions exactly.`;
-  const res = await runAgent(p.bin, args, prompt, ws, timeoutSeconds);
+  const res = await runAgent(p.bin, argv, ws, timeoutSeconds);
 
   const guardAfter = treeFingerprint(repo);
   const wsGuardAfter = ws === repo ? null : treeFingerprint(ws);
@@ -556,39 +646,7 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
 
   writeFileSync(join(runDir, 'response.json'), res.stdout || res.stderr || '');
 
-  let envelope;
-  if (res.timedOut) {
-    envelope = {
-      ok: false,
-      error: `timed out after ${timeoutSeconds}s`,
-      raw: (res.stdout || res.stderr).slice(0, 4000),
-    };
-  } else if (res.code !== 0) {
-    envelope = {
-      ok: false,
-      error: `${p.bin} exited ${res.code}`,
-      raw: (res.stderr || res.stdout).trim().slice(0, 4000),
-    };
-  } else {
-    const parsed = p.parse(res.stdout);
-    if (!parsed) {
-      envelope = {
-        ok: false,
-        error: 'output was not parseable JSON',
-        raw: (res.stdout || res.stderr).trim().slice(0, 4000),
-      };
-    } else if (parsed.is_error) {
-      envelope = { ok: false, error: 'agent reported an error', raw: String(parsed.result || '').slice(0, 4000) };
-    } else {
-      envelope = {
-        ok: true,
-        result: parsed.result,
-        sessionId: parsed.session_id,
-        durationMs: parsed.duration_ms,
-        usage: parsed.usage || null,
-      };
-    }
-  }
+  const envelope = buildEnvelope(p, res, timeoutSeconds);
 
   const meta = {
     verb,
@@ -634,6 +692,118 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
   process.exitCode = envelope.ok && !treeChanged ? 0 : 1;
 }
 
+/** Model ids this provider has actually run, so a one-off --model keeps its label. */
+function modelsUsedByRuns(provider) {
+  const ids = new Set();
+  if (!existsSync(RUNS)) return ids;
+  for (const bucket of readdirSync(RUNS)) {
+    let runs;
+    try {
+      runs = readdirSync(join(RUNS, bucket));
+    } catch {
+      continue;
+    }
+    for (const run of runs) {
+      try {
+        const m = JSON.parse(readFileSync(join(RUNS, bucket, run, 'meta.json'), 'utf8'));
+        if (m.provider === provider && m.model) ids.add(m.model);
+      } catch {}
+    }
+  }
+  return ids;
+}
+
+/** Provider names referenced by models.<job>, in config order, without duplicates. */
+function configuredProviders(cfg) {
+  return [...new Set(Object.values(cfg.models || {}).map((v) => String(v).split('/')[0]))];
+}
+
+/**
+ * Health check for every registered provider, not only the configured ones, so setup can offer
+ * whatever is installed. `ok` is true when the config parses cleanly and every provider named in
+ * models is installed and authenticated.
+ */
+async function doctorReport(cfg, repo) {
+  const errors = configErrors(cfg);
+  const providers = {};
+  for (const [name, p] of Object.entries(PROVIDERS)) {
+    const found = whichBin(p.bin);
+    const entry = {
+      bin: found || null,
+      authenticated: false,
+      readOnly: p.readOnly,
+      readOnlyStrength: p.readOnlyStrength,
+      modelCount: 0,
+      models: [],
+      modelLabels: {},
+    };
+    if (!found) {
+      entry.error = `${p.bin} not found on PATH`;
+      entry.installHint = p.installHint;
+      entry.thenRun = p.loginHint;
+      providers[name] = entry;
+      continue;
+    }
+    const list = await p.listModels(providerRunner(p, repo));
+    if (list.ok) {
+      entry.authenticated = true;
+      entry.modelCount = list.models.length;
+      entry.models = list.models.map(([id]) => id);
+      entry.modelLabels = Object.fromEntries(list.models);
+    } else {
+      entry.error = `${p.bin} is not signed in`;
+      entry.installHint = p.installHint;
+      entry.thenRun = p.loginHint;
+      entry.raw = String(list.raw || '')
+        .trim()
+        .slice(0, 1000);
+    }
+    providers[name] = entry;
+  }
+  const ok =
+    errors.length === 0 &&
+    configuredProviders(cfg).every((n) => Object.hasOwn(providers, n) && providers[n].authenticated);
+  return {
+    ok,
+    stateRoot: ROOT,
+    configPath: CONFIG_PATH,
+    configExists: existsSync(CONFIG_PATH),
+    config: cfg,
+    configErrors: errors,
+    providers,
+  };
+}
+
+/**
+ * Setup-time only. Refreshes display names for the models each configured provider still offers,
+ * keyed by provider then model id. A provider whose list call fails is left untouched rather than
+ * emptied. Never run during a run: two processes writing config is the same class of bug that
+ * made runs overwrite each other's packets.
+ */
+async function syncLabels(cfg, repo) {
+  const names = configuredProviders(cfg);
+  const onDisk = existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) : {};
+  const labels = { ...(onDisk.modelLabels || {}) };
+  for (const name of names) {
+    const p = PROVIDERS[name];
+    const list = await p.listModels(providerRunner(p, repo));
+    if (!list.ok) continue;
+    const live = Object.fromEntries(list.models);
+    const used = new Set();
+    for (const value of Object.values(cfg.models || {})) {
+      if (String(value).startsWith(`${name}/`)) used.add(String(value).slice(name.length + 1));
+    }
+    for (const id of modelsUsedByRuns(name)) used.add(id);
+    const table = {};
+    // Only ids the provider still offers, so the table doesn't accumulate retired models.
+    for (const id of used) if (live[id]) table[id] = live[id];
+    labels[name] = table;
+  }
+  onDisk.modelLabels = labels;
+  writeFileSync(CONFIG_PATH, `${JSON.stringify(onDisk, null, 2)}\n`);
+  return { ok: true, configPath: CONFIG_PATH, providers: names, labels };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const verb = args._[0];
@@ -649,126 +819,35 @@ async function main() {
   }
 
   if (verb === 'doctor') {
-    const provider = PROVIDERS.cursor;
-    const found = (() => {
-      try {
-        return execFileSync('/bin/sh', ['-c', `command -v ${provider.bin}`], { encoding: 'utf8' }).trim();
-      } catch {
-        return '';
-      }
-    })();
-    if (!found) {
-      return fail(`${provider.bin} not found on PATH`, {
-        installHint: provider.installHint,
-        thenRun: provider.loginHint,
-      });
-    }
-    const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
-    const authed = res.code === 0;
-    const rows = authed
-      ? res.stdout
-          .split('\n')
-          .map((l) => l.trim())
-          .filter((l) => l.includes(' - '))
-          .map((l) => [
-            l.split(' - ')[0],
-            l
-              .split(' - ')
-              .slice(1)
-              .join(' - ')
-              .replace(/\s*\(current\)$/, ''),
-          ])
-      : [];
-    const models = rows.map(([id]) => id);
-    // Display names are what the user sees in the terminal line, so setup can refresh the
-    // label table in config from here rather than anyone hand-maintaining model names.
-    const modelLabels = Object.fromEntries(rows);
-    process.stdout.write(
-      JSON.stringify(
-        {
-          ok: authed,
-          bin: found,
-          authenticated: authed,
-          authHint: authed ? null : provider.loginHint,
-          rawIfFailed: authed ? null : (res.stderr || res.stdout).trim().slice(0, 1000),
-          stateRoot: ROOT,
-          configPath: CONFIG_PATH,
-          configExists: existsSync(CONFIG_PATH),
-          config: cfg,
-          modelCount: models.length,
-          models,
-          modelLabels,
-        },
-        null,
-        2,
-      ) + '\n',
-    );
-    process.exitCode = authed ? 0 : 1;
+    const report = await doctorReport(cfg, repo);
+    process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+    process.exitCode = report.ok ? 0 : 1;
     return;
   }
 
   if (verb === 'sync-labels') {
-    // Setup-time only. Caches display names for every model that is configured or has ever been
-    // used, so the terminal status line stays readable after a one-off --model override. Deliberately
-    // not done during a run: runs would be writing a shared config file concurrently.
-    const provider = PROVIDERS.cursor;
-    const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
-    if (res.code !== 0) return fail('could not list models', { raw: (res.stderr || res.stdout).trim().slice(0, 600) });
-    const live = Object.fromEntries(
-      res.stdout
-        .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l.includes(' - '))
-        .map((l) => [
-          l.split(' - ')[0],
-          l
-            .split(' - ')
-            .slice(1)
-            .join(' - ')
-            .replace(/\s*\(current\)$/, ''),
-        ]),
-    );
-
-    const used = new Set(Object.values(cfg.models));
-    for (const repoDir of existsSync(RUNS) ? readdirSync(RUNS) : []) {
-      for (const run of readdirSync(join(RUNS, repoDir))) {
-        try {
-          const m = JSON.parse(readFileSync(join(RUNS, repoDir, run, 'meta.json'), 'utf8'));
-          if (m.model && live[m.model]) used.add(m.model);
-        } catch {}
-      }
-    }
-
-    const existing = cfg.modelLabels || {};
-    const labels = { ...existing };
-    for (const id of used) if (live[id]) labels[id] = live[id];
-    // Drop ids the provider no longer offers, so the table doesn't accumulate retired models.
-    for (const id of Object.keys(labels)) if (!live[id]) delete labels[id];
-
-    const onDisk = existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) : {};
-    onDisk.modelLabels = labels;
-    writeFileSync(CONFIG_PATH, `${JSON.stringify(onDisk, null, 2)}\n`);
-    process.stdout.write(
-      JSON.stringify(
-        {
-          ok: true,
-          configPath: CONFIG_PATH,
-          labelCount: Object.keys(labels).length,
-          added: Object.keys(labels).filter((k) => !(k in existing)),
-          labels,
-        },
-        null,
-        2,
-      ) + '\n',
-    );
+    const out = await syncLabels(cfg, repo);
+    process.stdout.write(JSON.stringify(out, null, 2) + '\n');
     return;
   }
 
   if (verb === 'models') {
-    const provider = PROVIDERS.cursor;
-    const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
-    process.stdout.write(res.stdout || res.stderr);
-    process.exitCode = res.code === 0 ? 0 : 1;
+    // --provider narrows to one CLI; without it, every provider named in config.
+    const names = args.provider && args.provider !== true ? [String(args.provider)] : configuredProviders(cfg);
+    let bad = false;
+    for (const name of names) {
+      process.stdout.write(`# ${name}\n`);
+      if (!Object.hasOwn(PROVIDERS, name)) {
+        process.stdout.write(`unknown provider "${name}"\n`);
+        bad = true;
+        continue;
+      }
+      const p = PROVIDERS[name];
+      const list = await p.listModels(providerRunner(p, repo));
+      process.stdout.write(`${String(list.raw || '').trim()}\n`);
+      if (!list.ok) bad = true;
+    }
+    process.exitCode = bad ? 1 : 0;
     return;
   }
 

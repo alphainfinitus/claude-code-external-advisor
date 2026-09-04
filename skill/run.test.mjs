@@ -76,6 +76,54 @@ function writeConfig(home, config) {
   writeFileSync(join(home, 'config.json'), `${JSON.stringify(config, null, 2)}\n`);
 }
 
+/**
+ * cursor-agent stub. `--list-models` prints the `id - Label (current)` shape the real CLI uses;
+ * anything else answers a run.
+ */
+function cursorStub({ listFails = false } = {}) {
+  const list = listFails
+    ? `echo 'Error: not logged in' >&2; exit 1 ;;`
+    : `printf 'gpt-5.6-sol-high - GPT-5.6 Sol 1M High (current)\\ngrok-4.6 - Grok 4.6\\n'; exit 0 ;;`;
+  return [
+    `case "$1" in`,
+    `  --list-models) ${list}`,
+    `esac`,
+    AGENT_OK,
+  ].join('\n');
+}
+
+/**
+ * agy stub. `models` prints tab-separated `id<TAB>label` and is the auth probe; `-p=/config`
+ * answers the settings probe; any other `-p=` answers a run with the agy JSON envelope.
+ * `argvLog` only ever records `-p=` calls, because `models` exits above it. That is what lets a
+ * test prove doctor made no agent call.
+ */
+function agyStub({ argvLog = '', conversationId = 'agy-conv-1', signedOut = false } = {}) {
+  const models = signedOut
+    ? `echo 'Error: Please sign in to view available models.' >&2; exit 1 ;;`
+    : `printf 'gemini-3.1-pro-high\\tGemini 3.1 Pro (High)\\nclaude-sonnet-4-6\\tClaude Sonnet 4.6\\n'; exit 0 ;;`;
+  // The real /config reply nests the setting under command.data.config, not command.data.
+  const configReply =
+    `{"conversation_id":"","status":"SUCCESS","response":"config",` +
+    `"command":{"name":"config","data":{"config":{"toolPermission":"always-proceed"}}}}`;
+  const envelope =
+    `{"conversation_id":"${conversationId}","status":"SUCCESS","response":"stub review",` +
+    `"duration_seconds":1,"num_turns":1,` +
+    `"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":2}}`;
+  return [
+    `case "$1" in`,
+    `  models) ${models}`,
+    `esac`,
+    argvLog ? `echo "$@" >> "${argvLog}"` : '',
+    `case "$*" in`,
+    `  *"-p=/config"*) echo '${configReply}'; exit 0 ;;`,
+    `esac`,
+    `echo '${envelope}'`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 /** All three jobs pointed at one cursor model. The value shape is "<provider>/<model>". */
 const CURSOR_MODELS = { models: { review: 'cursor/m1', advise: 'cursor/m1', consult: 'cursor/m1' } };
 
@@ -314,5 +362,48 @@ describe('config resolution', () => {
     assert.equal(out.ok, true, out.error);
     const meta = JSON.parse(readFileSync(join(out.runDir, 'meta.json'), 'utf8'));
     assert.equal(meta.provider, 'cursor');
+  });
+});
+
+describe('doctor and labels', () => {
+  it('reports every provider, not only the configured one', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    // doctor probes every entry in PROVIDERS, so every provider binary must be stubbed or it
+    // would reach a real CLI on the developer's machine.
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub() });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    assert.equal(out.configErrors.length, 0);
+    assert.equal(out.providers.cursor.authenticated, true);
+    assert.equal(out.providers.cursor.readOnly, '--mode ask');
+    assert.equal(out.providers.cursor.readOnlyStrength, 'dispatch');
+    assert.equal(out.providers.cursor.modelLabels['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
+    assert.ok(out.providers.cursor.models.includes('grok-4.6'));
+  });
+
+  it('reports a stale provider key as a config error instead of crashing', () => {
+    const home = tmp('home');
+    writeConfig(home, { provider: 'cursor', models: { consult: 'cursor/m1' } });
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub() });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.configErrors[0], 'config contains "provider"; remove it and use "<provider>/<model>" in models');
+  });
+
+  it('writes model labels keyed by provider then model id', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { consult: 'cursor/gpt-5.6-sol-high' } });
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub() });
+
+    const out = runCli(['sync-labels'], { home, bin });
+
+    assert.equal(out.ok, true);
+    assert.equal(out.labels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
+    const onDisk = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'));
+    assert.equal(onDisk.modelLabels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
   });
 });
