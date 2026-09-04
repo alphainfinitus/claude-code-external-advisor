@@ -60,11 +60,17 @@ making the user edit JSON:
    - If two providers are installed and authenticated, ask **which provider first**, then the
      model. If only one is, go straight to the model.
    - 200+ model ids is not a menu. Offer 3-4 curated options per job.
+   - **Recommend the newest model at its highest effort tier.** Newest means the highest
+     version number in the live list. Ignore tier names: a 3.8 Flash beats a 3.1 Pro, and Sol
+     5.6 beats Codex 5.3. A name like "Pro" or "Codex" says nothing about quality.
+   - **Sort the options newest first.** After the recommended one, offer one cheaper or faster
+     option and one from a different lineage.
    - **The question text explains what that job does**, in plain words. Most people do not
      remember the difference between advise and consult.
-   - **Every option names its provider and says why you would pick it**: lineage (is it unlike
-     Claude?), speed, context size, track record on this repo. "agy / gemini-3.1-pro-high — Gemini
-     3.1 Pro, large context, different lineage from Claude" beats a bare model id every time.
+   - **Every option names its provider and says why you would pick it**: how new it is, lineage
+     (is it unlike Claude?), speed, context size, track record on this repo. "agy /
+     gemini-3.8-flash-high — newest Gemini, large context, different lineage from Claude" beats
+     a bare model id every time.
    - Offer "same as advise" as a `consult` option; they are usually the same job. Mark the
      current value so a no-op answer is easy.
    - Say once, in plain words, how the two read-only guards differ: **Cursor refuses writes at the
