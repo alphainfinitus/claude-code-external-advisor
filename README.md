@@ -133,6 +133,11 @@ the working tree taken before and after each run, which fails the run if anythin
 In this configuration the external model can read files and spawn its own read-only subagents.
 Shell, edits and MCP servers are blocked on Cursor.
 
+On agy, plan mode removes nothing from the tool list. Measured on agy 1.1.26: the session still
+lists file write, shell, subagents, web search, browser control and MCP tools. Plan mode is only an
+instruction to the model. In tests it obeyed. The fingerprint guard is what catches a write. Whether
+an agy subagent inherits the plan-mode instruction was not measured.
+
 Web fetching is not blocked outright: the tool is dispatched and rejected per URL. Measured on
 Cursor, `cursor.com` succeeds while `example.com`, `github.com`, `docs.anthropic.com` and
 `raw.githubusercontent.com` are all rejected, which looks like a vendor allowlist rather than a

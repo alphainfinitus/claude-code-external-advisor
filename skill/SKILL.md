@@ -21,6 +21,11 @@ Only one of the two has to be installed. Whatever is missing simply cannot be pi
 "Dispatch" means the tool call is rejected by the CLI itself. "Prompt" means it is only an
 instruction to the model. Neither is a security boundary.
 
+On agy, plan mode leaves the full tool list in place: file write, shell, subagents, web search,
+browser control and MCP tools all stay listed (measured on agy 1.1.26). Only the instruction and
+the fingerprint guard stand between the model and a write. Both providers can spawn their own
+subagents; on agy, whether a subagent inherits plan mode was not measured.
+
 Two further layers back them up:
 
 - `sandbox` in config, which maps to Cursor's `--sandbox`. agy ignores it.
