@@ -13,7 +13,7 @@
  *   node run.mjs resume   --session ID --message STR [--repo P] [--model M]
  *   node run.mjs sync-labels
  *   node run.mjs doctor
- *   node run.mjs models
+ *   node run.mjs models  [--provider P]
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -1152,7 +1152,9 @@ async function main() {
     // run's metadata, never from config.
     const origin = findRunProvider(String(session));
     if (!origin) {
-      fail(`no run found for session "${session}"; resume only works from the state directory that started it`);
+      fail(
+        `no run found for session "${session}"; resume only works from the state directory that started it or the run was pruned (keepRuns)`,
+      );
     }
     // No model unless explicitly given: a resumed session keeps the model it started with, so
     // defaulting here would silently answer a review follow-up with the consult model.

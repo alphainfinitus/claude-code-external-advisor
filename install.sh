@@ -39,6 +39,11 @@ else
           console.log("Health check output was not JSON. Run the doctor command by hand.");
           return;
         }
+        // A config so broken that doctor could not build a report prints only {ok,error}.
+        if (r.error && !r.providers) {
+          console.log("doctor: " + r.error);
+          return;
+        }
         for (const [name, p] of Object.entries(r.providers || {})) {
           if (!p.bin) console.log(name + ": not installed. Install: " + p.installHint);
           else if (!p.authenticated) console.log(name + ": installed, not signed in. Run: " + p.thenRun);
