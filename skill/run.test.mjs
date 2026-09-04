@@ -103,14 +103,17 @@ function cursorStub({ listFails = false, argvLog = '' } = {}) {
  * `argvLog` only ever records `-p=` calls, because `models` exits above it. That is what lets a
  * test prove doctor made no agent call.
  */
-function agyStub({ argvLog = '', conversationId = 'agy-conv-1', signedOut = false } = {}) {
+function agyStub({ argvLog = '', conversationId = 'agy-conv-1', signedOut = false, badConfig = false } = {}) {
   const models = signedOut
     ? `echo 'Error: Please sign in to view available models.' >&2; exit 1 ;;`
     : `printf 'gemini-3.1-pro-high\\tGemini 3.1 Pro (High)\\nclaude-sonnet-4-6\\tClaude Sonnet 4.6\\n'; exit 0 ;;`;
   // The real /config reply nests the setting under command.data.config, not command.data.
-  const configReply =
-    `{"conversation_id":"","status":"SUCCESS","response":"config",` +
-    `"command":{"name":"config","data":{"config":{"toolPermission":"always-proceed"}}}}`;
+  // `badConfig` is a successful reply in a shape the parser cannot read, which is what a CLI
+  // upgrade that moves the setting would look like.
+  const configReply = badConfig
+    ? `{"conversation_id":"","status":"SUCCESS","response":"x"}`
+    : `{"conversation_id":"","status":"SUCCESS","response":"config",` +
+      `"command":{"name":"config","data":{"config":{"toolPermission":"always-proceed"}}}}`;
   const envelope =
     `{"conversation_id":"${conversationId}","status":"SUCCESS","response":"stub review",` +
     `"duration_seconds":1,"num_turns":1,` +
@@ -638,6 +641,21 @@ describe('multi-provider reporting', () => {
       'toolPermission is "always-proceed": agy will auto-approve tool calls in headless runs; plan mode is the only guard',
     );
     assert.deepEqual(out.providers.cursor.warnings, []);
+  });
+
+  it('warns when the agy toolPermission cannot be read at all', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'agy/gemini-3.1-pro-high' } });
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub({ badConfig: true }) });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    // Returning nothing here would silently delete the always-proceed safety warning the first
+    // time agy changes the shape of its /config reply.
+    assert.equal(
+      out.providers.agy.warnings[0],
+      'could not read agy toolPermission; check ~/.gemini/antigravity-cli/settings.json',
+    );
   });
 
   it('keeps the labels of a provider whose model list cannot be read', () => {

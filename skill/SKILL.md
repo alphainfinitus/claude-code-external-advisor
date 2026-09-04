@@ -52,6 +52,9 @@ making the user edit JSON:
 4. **Show every `warnings` string verbatim.** Do not paraphrase. `agy` warns when its global
    `toolPermission` setting is `always-proceed`, which means it auto-approves tool calls in
    headless runs, leaving plan mode as the only guard.
+   When the setting cannot be read at all the warning is
+   `could not read agy toolPermission; check ~/.gemini/antigravity-cli/settings.json`.
+   Treat that as unknown, not as safe.
 5. **Pick a provider and a model, per job.** Ask through the question UI: `review`, then `advise`,
    then `consult`.
    - If two providers are installed and authenticated, ask **which provider first**, then the

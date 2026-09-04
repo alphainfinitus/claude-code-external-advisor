@@ -184,16 +184,22 @@ const PROVIDERS = {
     // this once listModels reported signed in: on a signed-out agy, `-p` blocks for 60 seconds
     // on the sign-in prompt.
     async warnings(run) {
+      // Never return nothing on failure: a silent null is indistinguishable from "the setting is
+      // safe", so the first agy release that moves the setting would delete this warning.
+      const unreadable = 'could not read agy toolPermission; check ~/.gemini/antigravity-cli/settings.json';
       const res = await run(['-p=/config', '--output-format', 'json']);
-      if (res.code !== 0) return null;
+      if (res.code !== 0) return unreadable;
       try {
         const lines = res.stdout.trim().split('\n').filter(Boolean);
         // The setting is nested at command.data.config, not command.data.
         const data = JSON.parse(lines[lines.length - 1]).command.data.config;
-        if (data && data.toolPermission === 'always-proceed') {
+        if (!data) return unreadable;
+        if (data.toolPermission === 'always-proceed') {
           return 'toolPermission is "always-proceed": agy will auto-approve tool calls in headless runs; plan mode is the only guard';
         }
-      } catch {}
+      } catch {
+        return unreadable;
+      }
       return null;
     },
   },
