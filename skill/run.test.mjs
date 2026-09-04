@@ -5,7 +5,7 @@
  * No network and no Cursor subscription: `gh` and `cursor-agent` are stub executables placed on
  * PATH, and every repository is a throwaway under the OS temp directory.
  *
- *   node --test .agents/skills/external-advisor/
+ *   node --test skill/run.test.mjs
  */
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';

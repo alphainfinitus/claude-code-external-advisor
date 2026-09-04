@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs the external-advisor skill into ~/.claude/skills/.
-# Per-user state (model picks, run history) lives in ~/.claude/external-advisor/ and is untouched.
+# Per-user state (model picks, run history) lives inside the installed skill directory, next to run.mjs.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skill"
