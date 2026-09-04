@@ -445,3 +445,52 @@ describe('agy provider', () => {
     assert.equal(meta.model, 'other');
   });
 });
+
+describe('agy resume', () => {
+  it('resumes with --conversation and re-sends plan mode', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('agyresume'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ agy: agyStub({ argvLog: log }) });
+
+    const first = runCli(['review', '--repo', repo], { home, bin });
+    assert.equal(first.sessionId, 'agy-conv-1', first.error);
+
+    const out = runCli(['resume', '--repo', repo, '--session', 'agy-conv-1', '--message', 'why?'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    const lines = readFileSync(log, 'utf8').trim().split('\n');
+    const last = lines[lines.length - 1];
+    // `-p` eats the next token, so the prompt must ride on `-p=` and stay first in the argv.
+    assert.match(last.split(' ')[0], /^-p=/);
+    assert.match(last, /--conversation agy-conv-1/);
+    assert.match(last, /--mode plan/);
+  });
+
+  it('fails when agy answers from a different conversation', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('mismatch'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const binOne = stubBin({ agy: agyStub({ conversationId: 'agy-conv-1' }) });
+    const binTwo = stubBin({ agy: agyStub({ conversationId: 'agy-conv-2' }) });
+
+    const first = runCli(['review', '--repo', repo], { home, bin: binOne });
+    assert.equal(first.sessionId, 'agy-conv-1', first.error);
+
+    const out = runCli(['resume', '--repo', repo, '--session', 'agy-conv-1', '--message', 'why?'], {
+      home,
+      bin: binTwo,
+    });
+
+    assert.equal(out.ok, false);
+    assert.equal(
+      out.error,
+      'agy returned conversation agy-conv-2 but agy-conv-1 was requested; the session was not resumed',
+    );
+  });
+});

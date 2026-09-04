@@ -124,15 +124,18 @@ const PROVIDERS = {
     // Plan mode is a slash-command expansion, so it instructs the model rather than refusing a
     // tool call. It also does not survive a resume, which is why it is sent on every call.
     readOnlyStrength: 'prompt',
-    buildArgs({ model, addDir, timeoutSeconds, prompt }) {
+    buildArgs({ model, addDir, timeoutSeconds, resume, prompt }) {
       // `-p` consumes the next token as the prompt, so the prompt must ride on `-p=` and come
       // first. Putting it last, after the other flags, exits 2 with "--mode" read as the prompt.
       // Workspace is the child process cwd; agy has no workspace flag. --print-timeout must come
-      // from our timeout or agy's own 5-minute timer fires first.
+      // from our timeout or agy's own 5-minute timer fires first. Plan mode does not persist
+      // across a resume, so it is sent on every call, including this one.
       const a = [`-p=${prompt || ''}`, '--mode', 'plan', '--output-format', 'json'];
       if (model) a.push('--model', model);
       a.push('--print-timeout', `${timeoutSeconds}s`);
       if (addDir) a.push('--add-dir', addDir);
+      // --continue picks the globally most recent conversation and is unsafe for a runner.
+      if (resume) a.push('--conversation', resume);
       return a;
     },
     // `agy models` prints `id<TAB>label` per line. Not signed in: exit 1, empty stdout, the
@@ -452,7 +455,7 @@ function providerRunner(provider, cwd) {
  * Normalizes one provider run into the envelope the caller sees. Everything CLI-specific has
  * already been flattened by provider.parse, so nothing here knows which CLI ran.
  */
-function buildEnvelope(provider, res, timeoutSeconds) {
+function buildEnvelope(provider, res, timeoutSeconds, resume) {
   if (res.timedOut) {
     return { ok: false, error: `timed out after ${timeoutSeconds}s`, raw: (res.stdout || res.stderr).slice(0, 4000) };
   }
@@ -473,6 +476,15 @@ function buildEnvelope(provider, res, timeoutSeconds) {
   }
   if (!parsed.ok) {
     return { ok: false, error: 'agent reported an error', raw: String(parsed.error || parsed.text || '').slice(0, 4000) };
+  }
+  // A CLI that silently starts a new conversation when the id is unknown answers the right
+  // question in the wrong context, which reads as a plausible answer to the wrong history.
+  if (resume && provider.verifySession && !provider.verifySession(resume, parsed.sessionId)) {
+    return {
+      ok: false,
+      error: `${provider.bin} returned conversation ${parsed.sessionId} but ${resume} was requested; the session was not resumed`,
+      raw: (res.stdout || '').trim().slice(0, 4000),
+    };
   }
   return { ok: true, result: parsed.text, sessionId: parsed.sessionId, usage: parsed.usage || null };
 }
@@ -724,7 +736,7 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
 
   writeFileSync(join(runDir, 'response.json'), res.stdout || res.stderr || '');
 
-  const envelope = buildEnvelope(p, res, timeoutSeconds);
+  const envelope = buildEnvelope(p, res, timeoutSeconds, resume);
 
   const meta = {
     verb,
