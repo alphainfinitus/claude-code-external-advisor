@@ -16,7 +16,7 @@ duplicate either here.
 No build, no lint, no dependencies. The runner is stdlib-only Node (ESM, `.mjs`).
 
 ```bash
-node --test skill/run.test.mjs                                   # full suite (~6s, 21 tests)
+node --test skill/run.test.mjs                                   # full suite (~9s, 27 tests)
 node --test --test-name-pattern "write guard" skill/run.test.mjs # one describe/it by name
 node skill/run.mjs doctor                                        # health check: binary, auth, live model list, resolved paths
 ./install.sh                                                     # copy skill/ to ~/.claude/skills/external-advisor/
