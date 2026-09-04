@@ -71,6 +71,14 @@ function stubBin(stubs) {
   return bin;
 }
 
+/** DEFAULT_CONFIG carries no models, so every run needs one written into the state directory. */
+function writeConfig(home, config) {
+  writeFileSync(join(home, 'config.json'), `${JSON.stringify(config, null, 2)}\n`);
+}
+
+/** All three jobs pointed at one cursor model. The value shape is "<provider>/<model>". */
+const CURSOR_MODELS = { models: { review: 'cursor/m1', advise: 'cursor/m1', consult: 'cursor/m1' } };
+
 /** Runs the CLI against an isolated state directory and returns its JSON envelope. */
 function runCli(args, { home, bin } = {}) {
   const env = { ...process.env, EXTERNAL_ADVISOR_HOME: home };
@@ -93,6 +101,7 @@ function runCli(args, { home, bin } = {}) {
 describe('write guard', () => {
   it('refuses to run outside a git repository', () => {
     const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
     const dir = tmp('nogit');
     writeFileSync(join(dir, 'q.md'), 'question');
 
@@ -105,6 +114,7 @@ describe('write guard', () => {
 
   it('fails the run when the tree changes while the agent works', () => {
     const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
     const repo = initRepo(tmp('guard'));
     commit(repo, 'tracked.txt', 'original\n', 'init');
     writeFileSync(join(repo, 'q.md'), 'question');
@@ -121,6 +131,7 @@ describe('write guard', () => {
 describe('review scope', () => {
   it('reviews a branch whose only change is new untracked files', () => {
     const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
     const repo = initRepo(tmp('untracked'));
     commit(repo, 'README.md', 'base\n', 'init');
     writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
@@ -139,6 +150,7 @@ describe('review scope', () => {
 describe('run history', () => {
   it('keeps separate buckets for repositories that share a basename', () => {
     const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
     const bin = stubBin({ 'cursor-agent': AGENT_OK });
 
     for (const parent of ['one', 'two']) {
@@ -197,6 +209,7 @@ describe('pull request base', () => {
 
   it('diffs against the fetched base, not a stale remote-tracking ref', () => {
     const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
     const { work, bin } = prFixture();
 
     assert.equal(
@@ -215,6 +228,7 @@ describe('pull request base', () => {
 
   it('fails when the base branch cannot be fetched', () => {
     const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
     const { work, bin } = prFixture({ baseRefName: 'nosuchbase' });
 
     const out = runCli(['review', '--pr', '1', '--repo', work], { home, bin });
@@ -222,5 +236,83 @@ describe('pull request base', () => {
     assert.equal(out.ok, false);
     assert.match(out.error, /refusing to review against a possibly stale base/);
     assert.equal(git(work, 'for-each-ref', 'refs/external-advisor').trim(), '', 'must clean up its refs');
+  });
+});
+
+describe('config resolution', () => {
+  it('rejects a model with no provider prefix', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { consult: 'gemini-x' } });
+    const repo = initRepo(tmp('cfg'));
+    commit(repo, 'f.txt', 'x\n', 'init');
+    writeFileSync(join(repo, 'q.md'), 'question');
+    const bin = stubBin({ 'cursor-agent': AGENT_OK });
+
+    const out = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md')], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.error, 'models.consult must be "<provider>/<model>"; run setup');
+  });
+
+  it('rejects a provider that is not in the table', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { consult: 'nope/x' } });
+    const repo = initRepo(tmp('cfg'));
+    commit(repo, 'f.txt', 'x\n', 'init');
+    writeFileSync(join(repo, 'q.md'), 'question');
+    const bin = stubBin({ 'cursor-agent': AGENT_OK });
+
+    const out = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md')], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.error, 'unknown provider "nope" in models.consult');
+  });
+
+  it('rejects a config that still carries the old provider key', () => {
+    const home = tmp('home');
+    writeConfig(home, { provider: 'cursor', models: { consult: 'cursor/m1' } });
+    const repo = initRepo(tmp('cfg'));
+    commit(repo, 'f.txt', 'x\n', 'init');
+    writeFileSync(join(repo, 'q.md'), 'question');
+    const bin = stubBin({ 'cursor-agent': AGENT_OK });
+
+    const out = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md')], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.error, 'config contains "provider"; remove it and use "<provider>/<model>" in models');
+  });
+
+  it('keeps the job provider when --model has no prefix', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('bare'));
+    commit(repo, 'f.txt', 'x\n', 'init');
+    writeFileSync(join(repo, 'q.md'), 'question');
+    const bin = stubBin({ 'cursor-agent': AGENT_OK });
+
+    const out = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md'), '--model', 'other'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    const meta = JSON.parse(readFileSync(join(out.runDir, 'meta.json'), 'utf8'));
+    assert.equal(meta.provider, 'cursor');
+    assert.equal(meta.model, 'other');
+  });
+
+  it('resumes with the provider recorded by the original run', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('resume'));
+    commit(repo, 'f.txt', 'x\n', 'init');
+    writeFileSync(join(repo, 'q.md'), 'question');
+    const bin = stubBin({ 'cursor-agent': AGENT_OK });
+
+    const first = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md')], { home, bin });
+    assert.equal(first.sessionId, 'stub-1', first.error);
+
+    const out = runCli(['resume', '--repo', repo, '--session', 'stub-1', '--message', 'why?'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    const meta = JSON.parse(readFileSync(join(out.runDir, 'meta.json'), 'utf8'));
+    assert.equal(meta.provider, 'cursor');
   });
 });

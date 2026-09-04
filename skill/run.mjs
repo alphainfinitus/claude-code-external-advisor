@@ -39,15 +39,9 @@ function resolveRoots() {
 }
 
 const DEFAULT_CONFIG = {
-  provider: 'cursor',
-  models: {
-    review: 'gpt-5.6-sol-high',
-    advise: 'gpt-5.6-sol-high',
-    consult: 'gpt-5.6-sol-high',
-  },
   timeoutSeconds: 900,
   keepRuns: 20,
-  sandbox: 'enabled',
+  sandbox: true,
   maxDiffBytes: 400000,
   maxAdviseBytes: 160000,
 };
@@ -65,7 +59,7 @@ const PROVIDERS = {
     buildArgs({ model, workspace, addDir, sandbox, resume }) {
       const a = ['-p', '--mode', 'ask', '--trust', '--output-format', 'json'];
       if (workspace) a.push('--workspace', workspace);
-      if (sandbox) a.push('--sandbox', sandbox);
+      a.push('--sandbox', sandbox ? 'enabled' : 'disabled');
       if (model) a.push('--model', model);
       if (addDir) a.push('--add-dir', addDir);
       if (resume) a.push('--resume', resume);
@@ -86,6 +80,11 @@ const PROVIDERS = {
   },
 };
 
+/**
+ * Reads the config file and layers it over the defaults. Deliberately does not validate:
+ * `doctor` has to be able to load a broken config in order to report what is wrong with it.
+ * Validation lives in configErrors().
+ */
 function loadConfig() {
   let user = {};
   if (existsSync(CONFIG_PATH)) {
@@ -95,7 +94,92 @@ function loadConfig() {
       fail(`config.json is not valid JSON (${CONFIG_PATH}): ${e.message}`);
     }
   }
-  return { ...DEFAULT_CONFIG, ...user, models: { ...DEFAULT_CONFIG.models, ...(user.models || {}) } };
+  return { ...DEFAULT_CONFIG, ...user, models: { ...(user.models || {}) } };
+}
+
+const KNOWN_CONFIG_KEYS = new Set([
+  'models',
+  'timeoutSeconds',
+  'keepRuns',
+  'sandbox',
+  'maxDiffBytes',
+  'maxAdviseBytes',
+  'modelLabels',
+]);
+
+/**
+ * Everything wrong with the config on disk, as user-facing sentences. A stale key is an error
+ * rather than something to ignore, so a config written by an older version is caught whole
+ * instead of half-read.
+ */
+function configErrors(cfg) {
+  const errs = [];
+  for (const key of Object.keys(cfg)) {
+    if (KNOWN_CONFIG_KEYS.has(key)) continue;
+    if (key === 'provider') errs.push('config contains "provider"; remove it and use "<provider>/<model>" in models');
+    else errs.push(`unknown config key "${key}"; run setup`);
+  }
+  // A leftover "enabled" string is truthy, so cursor would read it as sandbox on and agy as
+  // nothing at all. That is the same half-read failure the provider check exists to stop.
+  if (typeof cfg.sandbox !== 'boolean') errs.push('sandbox must be true or false; run setup');
+  for (const [job, value] of Object.entries(cfg.models || {})) {
+    if (typeof value !== 'string' || !value.includes('/')) {
+      errs.push(`models.${job} must be "<provider>/<model>"; run setup`);
+      continue;
+    }
+    const provider = value.slice(0, value.indexOf('/'));
+    if (!Object.hasOwn(PROVIDERS, provider)) errs.push(`unknown provider "${provider}" in models.${job}`);
+  }
+  return errs;
+}
+
+/** Splits "<provider>/<model>" on the first slash. `where` names the source in the error. */
+function splitModel(value, where) {
+  const i = value.indexOf('/');
+  if (i < 0) fail(`${where} must be "<provider>/<model>"; run setup`);
+  const provider = value.slice(0, i);
+  const model = value.slice(i + 1);
+  if (!Object.hasOwn(PROVIDERS, provider)) fail(`unknown provider "${provider}" in ${where}`);
+  return { provider, model };
+}
+
+/**
+ * Picks the provider and model for one job. `--model <provider>/<model>` overrides both;
+ * a bare `--model <id>` keeps the job's configured provider and swaps only the model, so a
+ * one-off override cannot silently move the run to a different CLI.
+ */
+function resolveModel(cfg, job, override) {
+  const spec = override && override !== true ? String(override) : null;
+  if (spec && spec.includes('/')) return splitModel(spec, '--model');
+  const configured = (cfg.models || {})[job];
+  if (typeof configured !== 'string' || !configured) fail(`no model configured for ${job}; run setup`);
+  const base = splitModel(configured, `models.${job}`);
+  return spec ? { provider: base.provider, model: spec } : base;
+}
+
+/**
+ * Finds the provider that issued a session id, by scanning run metadata. A session id is only
+ * valid on the CLI that created it, so resume must not guess.
+ */
+function findRunProvider(session) {
+  if (!existsSync(RUNS)) return null;
+  for (const bucket of readdirSync(RUNS)) {
+    let runs;
+    try {
+      runs = readdirSync(join(RUNS, bucket));
+    } catch {
+      continue;
+    }
+    for (const run of runs) {
+      try {
+        const m = JSON.parse(readFileSync(join(RUNS, bucket, run, 'meta.json'), 'utf8'));
+        if (m.sessionId === session && Object.hasOwn(PROVIDERS, m.provider)) {
+          return { provider: m.provider, model: m.model };
+        }
+      } catch {}
+    }
+  }
+  return null;
 }
 
 function parseArgs(argv) {
@@ -430,7 +514,7 @@ function preparePr(repo, number) {
   };
 }
 
-async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSeconds, resume, extraMeta }) {
+async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody, timeoutSeconds, resume, extraMeta }) {
   // Checked before the packet is written or the provider spawns: outside a repo both fingerprints
   // are null, so the run would report `treeChanged: false` having verified nothing.
   if (!isRepo(repo)) {
@@ -441,8 +525,8 @@ async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSe
   // the agent actually reads, which for a PR review is a throwaway worktree. Keying history off
   // the worktree gave every PR run its own bucket, so keepRuns never pruned any of them.
   const ws = workspace || repo;
-  const provider = PROVIDERS[cfg.provider];
-  if (!provider) fail(`unknown provider "${cfg.provider}"`);
+  if (!Object.hasOwn(PROVIDERS, provider)) fail(`unknown provider "${provider}"`);
+  const p = PROVIDERS[provider];
 
   const runDir = join(RUNS, slug(repo), `${runId()}-${verb}`);
   mkdirSync(runDir, { recursive: true });
@@ -454,15 +538,16 @@ async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSe
   const guardBefore = treeFingerprint(repo);
   const wsGuardBefore = ws === repo ? null : treeFingerprint(ws);
 
-  const args = provider.buildArgs({
+  const args = p.buildArgs({
     model,
     workspace: ws,
     addDir: runDir,
     sandbox: cfg.sandbox,
     resume,
+    timeoutSeconds,
   });
   const prompt = `Read the file ${packetPath} in full and follow its instructions exactly.`;
-  const res = await runAgent(provider.bin, args, prompt, ws, timeoutSeconds);
+  const res = await runAgent(p.bin, args, prompt, ws, timeoutSeconds);
 
   const guardAfter = treeFingerprint(repo);
   const wsGuardAfter = ws === repo ? null : treeFingerprint(ws);
@@ -481,11 +566,11 @@ async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSe
   } else if (res.code !== 0) {
     envelope = {
       ok: false,
-      error: `${provider.bin} exited ${res.code}`,
+      error: `${p.bin} exited ${res.code}`,
       raw: (res.stderr || res.stdout).trim().slice(0, 4000),
     };
   } else {
-    const parsed = provider.parse(res.stdout);
+    const parsed = p.parse(res.stdout);
     if (!parsed) {
       envelope = {
         ok: false,
@@ -509,7 +594,7 @@ async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSe
     verb,
     repo,
     workspace: ws,
-    provider: cfg.provider,
+    provider,
     model: model || (resume ? "(the resumed session's own model)" : '(provider default)'),
     runDir,
     packetPath,
@@ -536,6 +621,7 @@ async function invoke({ cfg, verb, repo, workspace, model, packetBody, timeoutSe
     verb,
     runDir,
     packetPath,
+    provider,
     model: meta.model,
     elapsedMs: res.elapsedMs,
     treeChanged,
@@ -554,12 +640,16 @@ async function main() {
   const repo = resolve(args.repo || process.cwd());
   resolveRoots();
   const cfg = loadConfig();
-  const provider = PROVIDERS[cfg.provider];
   const timeoutSeconds = Number(args.timeout || cfg.timeoutSeconds);
 
-  const pickModel = (kind) => (args.model && args.model !== true ? args.model : cfg.models[kind]);
+  // Doctor's whole job is to report a broken config, so it is the one verb that may load one.
+  if (verb !== 'doctor') {
+    const errs = configErrors(cfg);
+    if (errs.length) fail(errs[0], { configErrors: errs });
+  }
 
   if (verb === 'doctor') {
+    const provider = PROVIDERS.cursor;
     const found = (() => {
       try {
         return execFileSync('/bin/sh', ['-c', `command -v ${provider.bin}`], { encoding: 'utf8' }).trim();
@@ -621,6 +711,7 @@ async function main() {
     // Setup-time only. Caches display names for every model that is configured or has ever been
     // used, so the terminal status line stays readable after a one-off --model override. Deliberately
     // not done during a run: runs would be writing a shared config file concurrently.
+    const provider = PROVIDERS.cursor;
     const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
     if (res.code !== 0) return fail('could not list models', { raw: (res.stderr || res.stdout).trim().slice(0, 600) });
     const live = Object.fromEntries(
@@ -674,6 +765,7 @@ async function main() {
   }
 
   if (verb === 'models') {
+    const provider = PROVIDERS.cursor;
     const res = await runAgent(provider.bin, ['--list-models'], '', repo, 60);
     process.stdout.write(res.stdout || res.stderr);
     process.exitCode = res.code === 0 ? 0 : 1;
@@ -744,12 +836,14 @@ async function main() {
           : ['(No tracked changes. The whole change is the untracked files listed above - read them.)']),
         '',
       ].join('\n');
+      const picked = resolveModel(cfg, 'review', args.model);
       return await invoke({
         cfg,
         verb: 'review',
         repo,
         workspace: reviewRoot,
-        model: pickModel('review'),
+        provider: picked.provider,
+        model: picked.model,
         packetBody: body,
         timeoutSeconds,
       });
@@ -818,11 +912,13 @@ async function main() {
     if (source.kind === 'transcript') {
       extraMeta.contextWarning = `Auto-forwarded the transcript for session ${source.sessionId} (last activity ${source.ageSeconds}s ago). If this is running inside a subagent, that is the PARENT conversation, not your own work - discard this answer and re-run with --context <file>.`;
     }
+    const picked = resolveModel(cfg, 'advise', args.model);
     return invoke({
       cfg,
       verb: 'advise',
       repo,
-      model: pickModel('advise'),
+      provider: picked.provider,
+      model: picked.model,
       packetBody: body,
       timeoutSeconds,
       extraMeta,
@@ -834,7 +930,16 @@ async function main() {
     if (!packetFile || packetFile === true) fail('consult requires --packet <file>');
     if (!existsSync(packetFile)) fail(`packet file not found: ${packetFile}`);
     const body = [readPrompt('consult'), '', '---', '', readFileSync(packetFile, 'utf8'), ''].join('\n');
-    return invoke({ cfg, verb: 'consult', repo, model: pickModel('consult'), packetBody: body, timeoutSeconds });
+    const picked = resolveModel(cfg, 'consult', args.model);
+    return invoke({
+      cfg,
+      verb: 'consult',
+      repo,
+      provider: picked.provider,
+      model: picked.model,
+      packetBody: body,
+      timeoutSeconds,
+    });
   }
 
   if (verb === 'resume') {
@@ -842,13 +947,33 @@ async function main() {
     const message = args.message;
     if (!session || session === true) fail('resume requires --session <id>');
     if (!message || message === true) fail('resume requires --message <text>');
+    // A session id belongs to the CLI that issued it, so the provider comes from the original
+    // run's metadata, never from config.
+    const origin = findRunProvider(String(session));
+    if (!origin) {
+      fail(`no run found for session "${session}"; resume only works from the state directory that started it`);
+    }
     // No model unless explicitly given: a resumed session keeps the model it started with, so
-    // defaulting here would silently answer a Codex review follow-up with the consult model.
+    // defaulting here would silently answer a review follow-up with the consult model.
+    let model = null;
+    if (args.model && args.model !== true) {
+      const spec = String(args.model);
+      if (spec.includes('/')) {
+        const picked = splitModel(spec, '--model');
+        if (picked.provider !== origin.provider) {
+          fail(`--model provider "${picked.provider}" does not match session provider "${origin.provider}"`);
+        }
+        model = picked.model;
+      } else {
+        model = spec;
+      }
+    }
     return invoke({
       cfg,
       verb: 'resume',
       repo,
-      model: args.model && args.model !== true ? args.model : null,
+      provider: origin.provider,
+      model,
       packetBody: `${message}\n`,
       timeoutSeconds,
       resume: session,
