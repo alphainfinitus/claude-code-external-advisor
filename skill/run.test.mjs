@@ -79,8 +79,10 @@ function writeConfig(home, config) {
 /**
  * cursor-agent stub. `--list-models` prints the `id - Label (current)` shape the real CLI uses;
  * anything else answers a run.
+ * `argvLog` only ever records `-p` calls, because `--list-models` exits above it. That is what
+ * lets a test prove the auth probe made no agent call, and pin the argv of the one that ran.
  */
-function cursorStub({ listFails = false } = {}) {
+function cursorStub({ listFails = false, argvLog = '' } = {}) {
   const list = listFails
     ? `echo 'Error: not logged in' >&2; exit 1 ;;`
     : `printf 'gpt-5.6-sol-high - GPT-5.6 Sol 1M High (current)\\ngrok-4.6 - Grok 4.6\\n'; exit 0 ;;`;
@@ -88,8 +90,11 @@ function cursorStub({ listFails = false } = {}) {
     `case "$1" in`,
     `  --list-models) ${list}`,
     `esac`,
+    argvLog ? `case "$1" in\n  -p) echo "$@" >> "${argvLog}" ;;\nesac` : '',
     AGENT_OK,
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 /**
@@ -441,6 +446,28 @@ describe('doctor and labels', () => {
     assert.equal(out.labels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
     const onDisk = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'));
     assert.equal(onDisk.modelLabels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
+  });
+});
+
+describe('cursor argv', () => {
+  it('sends ask mode, the sandbox flag, and the prompt last', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('cursorargv'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    const out = runCli(['review', '--repo', repo], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    const last = readFileSync(log, 'utf8').trim().split('\n').pop();
+    // `--mode ask` is the only layer that makes cursor refuse a write at tool dispatch.
+    assert.match(last, /--mode ask/);
+    assert.match(last, /--sandbox enabled/);
+    // cursor-agent takes the prompt as the last positional argument.
+    assert.match(last, /Read the file \S+ in full and follow its instructions exactly\.$/);
   });
 });
 
