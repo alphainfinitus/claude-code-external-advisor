@@ -4,3 +4,9 @@ node_modules/
 # runtime state, generated next to the skill
 skill/config.json
 skill/runs/
+
+# local design docs, not tracked
+.agent-artifacts/
+CLAUDE.local.md
+
+.superpowers/

@@ -2,9 +2,10 @@
 
 A Claude Code skill that gets a second opinion from a different model, without leaving Claude Code.
 
-It shells out to the [Cursor CLI](https://cursor.com/docs/cli/overview) in read-only mode, so
-GPT-5.x, Grok, Gemini or Composer can review a diff, critique the work Claude just did, or answer
-a design question. Usage bills against your existing Cursor subscription.
+It shells out to the [Cursor CLI](https://cursor.com/docs/cli/overview) or the
+[Antigravity CLI](https://antigravity.google/docs/cli) in read-only mode, so GPT-5.x, Grok, Gemini
+or Composer can review a diff, critique the work Claude just did, or answer a design question.
+Each mode picks its own provider and model. Usage bills against whichever account you use.
 
 ## Why
 
@@ -23,7 +24,9 @@ convincing.
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code)
-- A Cursor subscription and the Cursor CLI
+- One or both of:
+  - the [Cursor CLI](https://cursor.com/docs/cli/overview), with a Cursor subscription
+  - the [Antigravity CLI](https://antigravity.google/docs/cli) (`agy`), with a Google sign-in
 - Node, any recent version. The runner is stdlib only, no dependencies.
 - `gh`, only if you want `review --pr`
 
@@ -35,12 +38,16 @@ cd claude-code-external-advisor
 ./install.sh
 ```
 
-That copies `skill/` into `~/.claude/skills/external-advisor/`. If the Cursor CLI is missing it
-prints the two commands to install and log in:
+That copies `skill/` into `~/.claude/skills/external-advisor/`, then runs a health check and
+reports what each provider still needs:
 
 ```bash
+# Cursor
 curl https://cursor.com/install -fsS | bash
 cursor-agent login
+
+# Antigravity: install from https://antigravity.google/docs/cli, then sign in with
+agy
 ```
 
 To give it to a whole team instead, commit the same directory into your repo's `.agents/skills/`
@@ -86,35 +93,53 @@ The config file in that directory:
 
 | Key | Meaning |
 |---|---|
-| `models.review` / `.advise` / `.consult` | Model per mode. All three default to a large-context reasoning model. A code-specialised model is a reasonable alternative for `review` if you prefer speed over depth. |
+| `models.review` / `.advise` / `.consult` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required; there is no separate provider key. |
 | `timeoutSeconds` | Hard kill for a run. Default 900. |
 | `keepRuns` | Run folders kept per repository. Default 20. |
-| `sandbox` | `enabled` or `disabled`. |
+| `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy ignores it. |
 | `maxDiffBytes` / `maxAdviseBytes` | Approximate size caps, measured in JavaScript characters. Truncation is always reported, never silent. |
-| `modelLabels` | Display names, refreshed by `sync-labels`. |
+| `modelLabels` | Display names, keyed by provider then model id. Refreshed by `sync-labels`. |
 
 Ask Claude to "change the external advisor models" to re-run the picker rather than editing this
 by hand.
 
-Two notes on choosing models. Avoid `claude-*` for review and consult, since a Claude checking
-Claude's work defeats the purpose. Avoid `claude-fable-*` entirely, which Cursor flags as NO ZDR,
-meaning prompts are retained.
+Two notes on choosing models. Avoid `claude-*` for review and consult on either provider, since a
+Claude checking Claude's work defeats the purpose. Avoid `claude-fable-*` entirely, which Cursor
+flags as NO ZDR, meaning prompts are retained.
 
 ## How it works
 
-Every invocation writes a packet to disk, runs `cursor-agent -p --mode ask` against it, and parses
-the JSON result. Nothing is passed on the command line except a pointer to the packet.
+Every invocation writes a packet to disk, runs the provider CLI in its read-only mode against that
+packet, and parses the JSON result. Nothing is passed on the command line except a pointer to the
+packet.
 
-`--mode ask` is the read-only guarantee. Print mode alone is not: Cursor's own help says `-p` "has
-access to all tools, including write and shell". Ask mode refuses mutating tool calls at dispatch.
-Two further layers back it up: `--sandbox enabled`, and a content fingerprint of the working tree
-taken before and after each run, which fails the run if anything moved.
+| Provider | CLI | Read-only flag | Strength |
+|---|---|---|---|
+| `cursor` | `cursor-agent` | `--mode ask` | **dispatch** - the CLI refuses write and shell tool calls |
+| `agy` | `agy` | `--mode plan` | **prompt** - the model is told not to write; nothing refuses it |
+
+Neither is a security boundary.
+
+Print mode alone is not read-only at all. Cursor's own help says `-p` "has access to all tools,
+including write and shell". Ask mode refuses mutating tool calls at dispatch.
+
+agy's plan mode is a slash-command expansion, so it is an instruction rather than a permission
+gate. It blocked writes and shell in every test. It does not survive a resume, so the runner sends
+it on every call. agy's own `--sandbox` restricts nothing relevant, so it is not used.
+
+Two further layers back them up: `sandbox` in config (Cursor only), and a content fingerprint of
+the working tree taken before and after each run, which fails the run if anything moved.
 
 In this configuration the external model can read files and spawn its own read-only subagents.
-Shell, edits and MCP servers are blocked.
+Shell, edits and MCP servers are blocked on Cursor.
 
-Web fetching is not blocked outright: the tool is dispatched and rejected per URL. Measured,
-`cursor.com` succeeds while `example.com`, `github.com`, `docs.anthropic.com` and
+On agy, plan mode removes nothing from the tool list. Measured on agy 1.1.26: the session still
+lists file write, shell, subagents, web search, browser control and MCP tools. Plan mode is only an
+instruction to the model. In tests it obeyed. The fingerprint guard is what catches a write. Whether
+an agy subagent inherits the plan-mode instruction was not measured.
+
+Web fetching is not blocked outright: the tool is dispatched and rejected per URL. Measured on
+Cursor, `cursor.com` succeeds while `example.com`, `github.com`, `docs.anthropic.com` and
 `raw.githubusercontent.com` are all rejected, which looks like a vendor allowlist rather than a
 guarantee. Do not treat network isolation as part of the safety model.
 
@@ -127,17 +152,20 @@ every exit path.
 All three modes run with the repository as the model's workspace, so it can read repository files
 in any mode, and does. What differs is the transcript.
 
-`advise` additionally forwards a distilled copy of the session to Cursor's model providers,
-including any tool output that passed through it, and keeps a copy on disk. Tell people that
-before they use it. `review` and `consult` forward no transcript, only the packet you or the
-skill composed, so those are the modes to use when session contents matter.
+`advise` additionally forwards a distilled copy of the session to the provider's model vendor -
+Cursor's model providers on `cursor`, Google on `agy` - including any tool output that passed
+through it, and keeps a copy on disk. `agy` also keeps a full copy of every conversation under
+`~/.gemini/antigravity-cli/`, outside this skill's control. Tell people that before they use it.
+`review` and `consult` forward no transcript, only the packet you or the skill composed, so those
+are the modes to use when session contents matter.
 
 Packets and raw responses are written to the state directory's `runs/` and kept for the last
 `keepRuns` runs per repository. They contain full diffs.
 
 ## Limitations
 
-- Ask mode is vendor behaviour, not a security boundary. Re-check it after a Cursor CLI upgrade.
+- Ask mode and plan mode are vendor behaviour, not security boundaries. Plan mode is the weaker of
+  the two: it is an instruction to the model, not a refusal. Re-check both after a CLI upgrade.
 - A write followed by a revert during a run is invisible to the fingerprint.
 - The guard also fires if you edit repo files while a run is in progress. Runs take 30 to 150
   seconds.

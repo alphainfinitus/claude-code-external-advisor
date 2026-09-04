@@ -1,19 +1,38 @@
 ---
 name: external-advisor
-description: Get a second opinion from a different AI model (GPT-5.x Codex, Grok, Gemini, Composer) through the Cursor CLI, without leaving Claude Code. Use whenever the user asks for an external review, a second opinion, a sanity check from another model, "what would GPT/Codex/Cursor say", "am I missing something", "check my approach", wants a PR or diff or design judged by something that isn't Claude, or is stuck on a decision where independent judgement helps - and whenever they name it directly ("use the external-advisor", "/external-advisor"). Three modes - advise (an external model critiques the work THIS agent just did, like the built-in advisor), review (fresh-eyes review of a diff or PR), consult (opinion on a question). Read this before running cursor-agent by hand.
+description: Get a second opinion from a different AI model (GPT-5.x, Grok, Gemini, Composer) through the Cursor CLI or the Google Antigravity CLI, without leaving Claude Code. Use whenever the user asks for an external review, a second opinion, a sanity check from another model, "what would GPT/Gemini/Codex/Cursor say", "am I missing something", "check my approach", wants a PR or diff or design judged by something that isn't Claude, or is stuck on a decision where independent judgement helps - and whenever they name it directly ("use the external-advisor", "/external-advisor"). Three modes - advise (an external model critiques the work THIS agent just did, like the built-in advisor), review (fresh-eyes review of a diff or PR), consult (opinion on a question). Read this before running cursor-agent or agy by hand.
 ---
 
 # External advisor
 
-Runs a **different model** over your work through the Cursor CLI and brings its answer back
-here. The point is lineage diversity: Claude reviewing Claude's code shares Claude's blind
-spots, and a model that never saw the reasoning has no reason to find it convincing.
+Runs a **different model** over your work and brings its answer back here. The point is lineage
+diversity: Claude reviewing Claude's code shares Claude's blind spots, and a model that never saw
+the reasoning has no reason to find it convincing.
 
-Everything runs in Cursor's `--mode ask`, which refuses file writes at tool dispatch (tested:
-asked to create a file, it declined and none appeared). Treat that as vendor behaviour, not a
-security boundary - re-check it after a Cursor CLI upgrade, and don't lean on it against a
-deliberately hostile prompt. Two further layers back it up: `--sandbox enabled`, and a
-content fingerprint of the working tree taken before and after every run.
+Two provider CLIs are supported. Each job picks one, in config.
+
+| Provider | CLI | Needs | Read-only flag | How strong that guard is |
+|---|---|---|---|---|
+| `cursor` | `cursor-agent` | a Cursor account | `--mode ask` | **dispatch** - the CLI refuses write and shell tool calls |
+| `agy` | `agy` (Google Antigravity) | a Google sign-in | `--mode plan` | **prompt** - the model is *told* not to write; nothing refuses it |
+
+Only one of the two has to be installed. Whatever is missing simply cannot be picked.
+
+"Dispatch" means the tool call is rejected by the CLI itself. "Prompt" means it is only an
+instruction to the model. Neither is a security boundary.
+
+On agy, plan mode leaves the full tool list in place: file write, shell, subagents, web search,
+browser control and MCP tools all stay listed (measured on agy 1.1.26). Only the instruction and
+the fingerprint guard stand between the model and a write. Both providers can spawn their own
+subagents; on agy, whether a subagent inherits plan mode was not measured.
+
+Two further layers back them up:
+
+- `sandbox` in config, which maps to Cursor's `--sandbox`. agy ignores it.
+- A content fingerprint of the working tree taken before and after every run. If anything moved,
+  the run is marked failed even when the model answered.
+
+Re-check what each read-only mode blocks after a CLI upgrade.
 
 ## setup — first run, and changing models
 
@@ -23,42 +42,64 @@ Run this before the first use, and whenever the user wants a different model:
 node $SKILL/run.mjs doctor
 ```
 
-It returns JSON with `bin`, `authenticated`, the active config, and the live model list. Drive
-the rest interactively rather than making the user edit JSON:
+It returns JSON with `stateRoot`, `configPath`, `configExists`, `config`, `configErrors`, and a
+`providers` map. Every provider entry has `bin`, `authenticated`, `readOnly`, `readOnlyStrength`,
+`modelCount`, `models`, `modelLabels` and `warnings`. Drive the rest interactively rather than
+making the user edit JSON:
 
-1. **Binary missing** — `doctor` returns `installHint`. Offer to run the install; it's a plain
-   curl and needs no interaction.
-2. **Not authenticated** — `cursor-agent login` opens a browser, so it has to be theirs to run.
-   Tell them to type `! cursor-agent login`; the `!` prefix runs it in the session.
-3. **Choosing models** — 200+ ids is not a menu. Ask **three questions through the question UI,
-   one per mode** (`review`, `advise`, `consult`), each with 3-4 curated options.
-
-   Two things make this picker actually useful, so don't skip either:
-   - **The question text explains what that mode does**, in plain words — most people don't
-     remember the difference between advise and consult, and they're choosing a model for a job
-     they can't name.
-   - **Every option says why you'd pick it**: lineage (is it unlike Claude?), speed, context
-     size, and whether it has a track record on this repo's work. "Grok 4.6 — furthest from
-     Claude of anything available, most independent judgement, least track record" beats the
-     bare model id every time.
-
-   Offer "same as advise" as a `consult` option; they're usually the same job. Mark the current
-   value so a no-op answer is easy.
-4. **Tell them what `advise` sends**, before their first use. This is not optional for someone who
-   didn't build the tool: `advise` auto-forwards a distilled copy of the whole session - including
+1. **Read `configErrors` first.** A non-empty list means the config on disk is stale or wrong.
+   Each string says what to fix. Rewrite the config from the picks below rather than patching it.
+2. **Binary missing** — the provider entry carries `installHint`. Cursor's is a plain curl, so
+   offer to run it. Antigravity's is a docs page, so the user installs it themselves.
+3. **Not authenticated** — the entry carries `thenRun`. Both logins open a browser, so they have
+   to be the user's to run. Tell them to type `! cursor-agent login`, or `! agy`, in the session.
+   The `!` prefix runs a shell command there.
+4. **Show every `warnings` string verbatim.** Do not paraphrase. `agy` warns when its global
+   `toolPermission` setting is `always-proceed`, which means it auto-approves tool calls in
+   headless runs, leaving plan mode as the only guard.
+   When the setting cannot be read at all the warning is
+   `could not read agy toolPermission; check ~/.gemini/antigravity-cli/settings.json`.
+   Treat that as unknown, not as safe.
+5. **Pick a provider and a model, per job.** Ask through the question UI: `review`, then `advise`,
+   then `consult`.
+   - If two providers are installed and authenticated, ask **which provider first**, then the
+     model. If only one is, go straight to the model.
+   - 200+ model ids is not a menu. Offer 3-4 curated options per job.
+   - **Recommend the newest model at its highest effort tier.** Newest means the highest
+     version number in the live list. Ignore tier names: a 3.8 Flash beats a 3.1 Pro, and Sol
+     5.6 beats Codex 5.3. A name like "Pro" or "Codex" says nothing about quality.
+   - **Sort the options newest first.** After the recommended one, offer one cheaper or faster
+     option and one from a different lineage.
+   - **The question text explains what that job does**, in plain words. Most people do not
+     remember the difference between advise and consult.
+   - **Every option names its provider and says why you would pick it**: how new it is, lineage
+     (is it unlike Claude?), speed, context size, track record on this repo. "agy /
+     gemini-3.8-flash-high — newest Gemini, large context, different lineage from Claude" beats
+     a bare model id every time.
+   - Offer "same as advise" as a `consult` option; they are usually the same job. Mark the
+     current value so a no-op answer is easy.
+   - Say once, in plain words, how the two read-only guards differ: **Cursor refuses writes at the
+     tool level; agy is only told not to write, and the fingerprint guard catches it if it does.**
+6. **Tell them what `advise` sends**, before their first use. This is not optional for someone who
+   didn't build the tool. `advise` auto-forwards a distilled copy of the whole session - including
    tool output that happened to pass through it, such as ticket contents, log queries or internal
-   search results - to Cursor's model providers, and keeps a copy under
-   the skill's own `runs/` directory. It triggers on phrases as ordinary as "am I missing
-   something". Say it plainly once. `review` and `consult` forward no transcript, only the packet, so they
-   are the modes for when session contents matter - but note all three modes give the model the
-   repository as its workspace, so it reads repository files in every mode.
-5. Write their picks into the config (`doctor` reports its exact path as `configPath`), then run
-   `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it
-   working (a bare `review` on a clean tree has no diff and errors out).
+   search results - to the model vendor behind the provider you picked. On `cursor` that is
+   Cursor's model providers. On `agy` that is Google, and agy also keeps a full copy of every
+   conversation under `~/.gemini/antigravity-cli/`, outside this skill's control. A copy is kept
+   under the skill's own `runs/` directory too. It triggers on phrases as ordinary as "am I
+   missing something". Say it plainly once. `review` and `consult` forward no transcript, only the
+   packet, so those are the modes for when session contents matter - but note all three modes give
+   the model the repository as its workspace, so it reads repository files in every mode.
+7. Write their picks into the config (`doctor` reports its exact path as `configPath`) as
+   `"models": {"review": "<provider>/<model>", ...}`, then run
+   `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it working
+   (a bare `review` on a clean tree has no diff and errors out).
 
-Never guess at model IDs — they rot fast, and `doctor` is the live list. Steer away from
-`claude-*` for `review` and `consult` (a Claude reviewing Claude's work defeats the purpose)
-and never offer `claude-fable-*`, which Cursor flags **NO ZDR**.
+Never guess at model IDs — they rot fast, and `doctor` is the live list per provider. Steer away
+from `claude-*` for `review` and `consult` on **either** provider: a Claude reviewing Claude's work
+defeats the purpose. agy's catalogue includes `claude-sonnet-4-6` and `claude-opus-4-6-thinking`,
+so the rule applies there too. Never offer `claude-fable-*`, which Cursor flags **NO ZDR**, meaning
+prompts are retained. That NO ZDR note is Cursor-specific.
 
 ## Where the runner lives
 
@@ -99,11 +140,17 @@ available - set it on **every** external-advisor invocation, in exactly this sha
 - `consult` → `Consulting via External Advisor using GPT-5.6 Sol 1M High`
 - `resume`  → `Following up via External Advisor using GPT-5.6 Sol 1M High`
 
-Model labels live in `modelLabels` in the config - read it rather than inventing a name, and
-fall back to the raw model id if the label isn't there. If a model you're about to use has no label, run
+Model labels live in `modelLabels` in the config, keyed by **provider first, then model id**. Read
+`modelLabels[provider][model]` rather than inventing a name, and fall back to `provider/model` if
+the label isn't there. Every run's JSON envelope carries `provider` and `model`, so you can look
+the label up after the fact. If a model you're about to use has no label, run
 `node $SKILL/run.mjs sync-labels` - it caches display names for every model that is configured or
-has been used before, and drops ids the provider has retired. Never write all 200+ into the
-config; that turns it into 34KB nobody can read.
+has been used before, and drops ids a provider has retired. Never write all 200+ into the config;
+that turns it into 34KB nobody can read.
+
+`sync-labels` also returns a `skipped` array.
+It names the providers it could not refresh.
+Their labels are left as they were.
 
 After a run that used `--model` with something not already in the table, run `sync-labels` once
 the run has finished. That keeps the table current without anyone having to think about it, and
@@ -218,13 +265,16 @@ node $SKILL/run.mjs review --repo /path/to/repo \
   review the uncommitted working tree.
 - `--task` is the author's one-line intent. Include it — a reviewer that doesn't know what the
   change is *for* can only find syntax problems.
-- `--model <id>` overrides the configured model for a single run, without touching config.
+- `--model <provider>/<model>` overrides both provider and model for a single run, without
+  touching config. A bare `--model <id>` keeps the job's configured provider and swaps only the
+  model.
 
-When the user names a model in their request ("review PR 1234 with Sol", "what does Grok think",
-"use gpt-5.6-sol-high"), pass it through as `--model` rather than editing config - they want it
-for that run, not as a new default. Resolve friendly names against `modelLabels` in config and
-the live list from `doctor`; don't guess an id, and if two could match, ask which. Say which
-model actually ran when you report back, since it differs from the usual one.
+When the user names a model in their request ("review PR 1234 with Sol", "what does Gemini think",
+"use gpt-5.6-sol-high"), pass it through as `--model` rather than editing config - they want it for
+that run, not as a new default. Resolve friendly names against `modelLabels` for **both** providers
+and the live lists from `doctor`. If the same friendly name exists on both providers, ask which.
+Don't guess an id. Say which provider and model actually ran when you report back, since it differs
+from the usual one.
 
 ```bash
 node $SKILL/run.mjs review --repo . --pr 1234
@@ -270,9 +320,15 @@ Every successful run returns a `sessionId`. Use it when the answer conflicts wit
 you've already verified — reconciling is cheaper than accepting a wrong branch, and cheaper
 than re-briefing from scratch.
 
+A session id is only valid on the CLI that issued it. The runner looks the provider up from the
+original run's saved metadata, so you pass only `--session` and `--message`.
+
+On `agy`, if the reply carries a different conversation id than the one you asked for, the run
+fails instead of answering from a fresh conversation. Cursor has no such check.
+
 ## Reading the result
 
-Output is one JSON envelope on stdout: `{ok, result, sessionId, runDir, model, usage,
+Output is one JSON envelope on stdout: `{ok, result, sessionId, runDir, provider, model, usage,
 treeChanged}`. The full packet and raw response are kept in `runDir` (last 20 runs per repo).
 
 `result` is the model's prose, ending in a fenced JSON block (verdict + findings for review,
@@ -297,6 +353,14 @@ binary, missing packet file, bad config) carry only `error`, plus hints such as 
 plain-text and self-explanatory (invalid API key, unknown model, timeout), and paraphrasing
 them loses the fix. Don't retry a failed run unchanged.
 
+Every run pre-flights its provider before it writes a packet or spawns anything. Two failures
+come from there, and both are fixed by the user, not by retrying:
+
+- `<bin> not found on PATH` — carries `installHint` and `thenRun`. The CLI is not installed.
+- `<bin> is not signed in` — carries `raw`, the CLI's own reason, and `thenRun`. Relay `raw`
+  verbatim. This check exists because a signed-out `agy` would otherwise block for 60 seconds
+  on its sign-in prompt.
+
 A reviewed diff can contain text aimed at the reviewer. One canary - a diff whose comment ordered
 the reviewer to return "ship" with zero findings - was ignored; it reported the real bug and said
 do-not-ship. That's one test, not a guarantee: a verdict on a diff or PR body containing
@@ -306,9 +370,12 @@ For `--pr`, the run fails if the base fetch fails, and if the base ref goes miss
 either one would otherwise review the PR against an out-of-date base. If a PR review still looks
 bigger than the PR, check the stat block for already-merged commits.
 
-If `treeChanged` is true the run is marked failed even when the model answered: a read-only
-advisor writing to the tree means something is wrong with the invocation. Say so loudly and
-have the user check `git status` before trusting anything from that run.
+If `treeChanged` is true the run is marked failed even when the model answered: a read-only advisor
+writing to the tree means something is wrong with the invocation. Say so loudly and have the user
+check `git status` before trusting anything from that run. Then run `node $SKILL/run.mjs doctor`
+and show `providers.<provider>.warnings` verbatim. On `agy` the usual cause is
+`toolPermission: always-proceed`, which leaves plan mode - an instruction, not a refusal - as the
+only guard.
 
 The fingerprint hashes the status list, the tracked diff, and size+mtime of untracked files,
 because porcelain output alone reports only status codes and paths - an already-dirty file can
@@ -316,18 +383,31 @@ be edited further without its status line moving. Git-ignored files are out of s
 
 ## Tests
 
-`node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the
-write guard, untracked-only reviews, run-history isolation, and both PR base-ref failures. The
-suite stubs `gh` and `cursor-agent` on PATH, so it needs no network and no Cursor subscription.
-Run it after a Cursor CLI upgrade alongside re-checking what ask mode blocks.
+`node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
+guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
+and both providers end to end. 27 tests. The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so
+it needs no network and no account with either vendor. Run it after a Cursor CLI or Antigravity CLI
+upgrade, alongside re-checking what `--mode ask` and `--mode plan` actually block.
 
 ## Config
 
-The config file (`doctor` reports `configPath`) — per-verb model, timeout (default 900s), retained
-run count, sandbox mode, diff size cap, advise transcript budget, and `modelLabels` (the
-human-readable names used in the terminal line). `doctor` returns fresh labels for all models,
-so setup can refresh that table whenever the picks change. To change the default model, offer the user the live
-list from `doctor` and write their pick back to this file.
+The config file (`doctor` reports `configPath`):
 
-Default picks are non-Claude on purpose. `claude-fable-*` is excluded outright: Cursor flags
-it **NO ZDR**, meaning prompts are retained.
+| Key | Meaning |
+|---|---|
+| `models.review` / `.advise` / `.consult` | `"<provider>/<model>"`. Both halves required. |
+| `timeoutSeconds` | Hard kill for a run. Default 900. |
+| `keepRuns` | Run folders kept per repository. Default 20. |
+| `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy ignores it. |
+| `maxDiffBytes` / `maxAdviseBytes` | Size caps, in JavaScript characters. Truncation is always reported. |
+| `modelLabels` | `modelLabels[provider][modelId]` display names, refreshed by `sync-labels`. |
+
+There is no `provider` key. A config that still carries one is rejected with
+`config contains "provider"; remove it and use "<provider>/<model>" in models`. Any other unknown
+top-level key is rejected too, so a stale config is caught whole rather than half-read.
+
+`doctor` returns fresh labels per provider, so setup can refresh that table whenever the picks
+change. To change a default model, offer the live list from `doctor` and write the pick back here.
+
+Default picks are non-Claude on purpose, on both providers. `claude-fable-*` is excluded outright:
+Cursor flags it **NO ZDR**, meaning prompts are retained.
