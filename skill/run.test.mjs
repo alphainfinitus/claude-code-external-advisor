@@ -407,3 +407,41 @@ describe('doctor and labels', () => {
     assert.equal(onDisk.modelLabels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
   });
 });
+
+describe('agy provider', () => {
+  it('runs a review through agy and records the provider', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('agy'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const bin = stubBin({ agy: agyStub() });
+
+    const out = runCli(['review', '--repo', repo], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.result, 'stub review');
+    assert.equal(out.sessionId, 'agy-conv-1');
+    assert.equal(out.provider, 'agy');
+    const meta = JSON.parse(readFileSync(join(out.runDir, 'meta.json'), 'utf8'));
+    assert.equal(meta.provider, 'agy');
+    assert.equal(meta.model, 'gemini-3.1-pro-high');
+    assert.equal(meta.usage.total_tokens, 2);
+  });
+
+  it('lets --model <provider>/<model> switch provider and model', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('switch'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub() });
+
+    const out = runCli(['review', '--repo', repo, '--model', 'agy/other'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    const meta = JSON.parse(readFileSync(join(out.runDir, 'meta.json'), 'utf8'));
+    assert.equal(meta.provider, 'agy');
+    assert.equal(meta.model, 'other');
+  });
+});

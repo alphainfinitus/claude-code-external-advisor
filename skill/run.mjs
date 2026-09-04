@@ -116,6 +116,84 @@ const PROVIDERS = {
       return null;
     },
   },
+  agy: {
+    bin: 'agy',
+    installHint: 'https://antigravity.google/docs/cli  (install the Antigravity CLI from its docs page)',
+    loginHint: 'agy  (run it with no arguments; it opens the sign-in flow, so the user must run this themselves)',
+    readOnly: '--mode plan',
+    // Plan mode is a slash-command expansion, so it instructs the model rather than refusing a
+    // tool call. It also does not survive a resume, which is why it is sent on every call.
+    readOnlyStrength: 'prompt',
+    buildArgs({ model, addDir, timeoutSeconds, prompt }) {
+      // `-p` consumes the next token as the prompt, so the prompt must ride on `-p=` and come
+      // first. Putting it last, after the other flags, exits 2 with "--mode" read as the prompt.
+      // Workspace is the child process cwd; agy has no workspace flag. --print-timeout must come
+      // from our timeout or agy's own 5-minute timer fires first.
+      const a = [`-p=${prompt || ''}`, '--mode', 'plan', '--output-format', 'json'];
+      if (model) a.push('--model', model);
+      a.push('--print-timeout', `${timeoutSeconds}s`);
+      if (addDir) a.push('--add-dir', addDir);
+      return a;
+    },
+    // `agy models` prints `id<TAB>label` per line. Not signed in: exit 1, empty stdout, the
+    // reason on stderr. `-p` must not be used as an auth probe: it blocks on an OAuth prompt.
+    async listModels(run) {
+      const res = await run(['models']);
+      if (res.code !== 0) return { ok: false, models: [], raw: (res.stderr || res.stdout).trim() };
+      const models = res.stdout
+        .split('\n')
+        .map((l) => l.replace(/\r$/, ''))
+        .filter((l) => l.trim())
+        .map((l) => {
+          const i = l.indexOf('\t');
+          return i < 0 ? [l.trim(), l.trim()] : [l.slice(0, i).trim(), l.slice(i + 1).trim()];
+        });
+      return { ok: true, models, raw: res.stdout };
+    },
+    // Stdout is exactly one JSON line. Failures set status "ERROR" and an `error` string.
+    parse(stdout) {
+      const lines = stdout.trim().split('\n').filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        let o;
+        try {
+          o = JSON.parse(lines[i]);
+        } catch {
+          continue;
+        }
+        if (!o || typeof o !== 'object' || !('status' in o)) continue;
+        return {
+          ok: o.status === 'SUCCESS',
+          text: o.response,
+          sessionId: o.conversation_id || null,
+          usage: o.usage || null,
+          error: o.error || null,
+        };
+      }
+      return null;
+    },
+    // An unknown --conversation id prints a warning on stderr and silently starts a NEW
+    // conversation with exit 0, so the returned id is the only reliable signal.
+    verifySession(requested, returned) {
+      return returned === requested;
+    },
+    // The global toolPermission setting decides whether headless runs auto-approve tools.
+    // Readable without an agent turn via the /config slash command. The caller must only run
+    // this once listModels reported signed in: on a signed-out agy, `-p` blocks for 60 seconds
+    // on the sign-in prompt.
+    async warnings(run) {
+      const res = await run(['-p=/config', '--output-format', 'json']);
+      if (res.code !== 0) return null;
+      try {
+        const lines = res.stdout.trim().split('\n').filter(Boolean);
+        // The setting is nested at command.data.config, not command.data.
+        const data = JSON.parse(lines[lines.length - 1]).command.data.config;
+        if (data && data.toolPermission === 'always-proceed') {
+          return 'toolPermission is "always-proceed": agy will auto-approve tool calls in headless runs; plan mode is the only guard';
+        }
+      } catch {}
+      return null;
+    },
+  },
 };
 
 /**
