@@ -709,6 +709,17 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
   if (!Object.hasOwn(PROVIDERS, provider)) fail(`unknown provider "${provider}"`);
   const p = PROVIDERS[provider];
 
+  // Pre-flight, before anything is written or spawned. Without it a missing binary surfaces as
+  // `spawn ENOENT` with no way to fix it, and a signed-out agy blocks for 60 seconds on the
+  // sign-in prompt. listModels is the auth probe: one extra spawn, no model turn, about a second.
+  if (!whichBin(p.bin)) {
+    fail(`${p.bin} not found on PATH`, { installHint: p.installHint, thenRun: p.loginHint });
+  }
+  const probe = await p.listModels(providerRunner(p, ws));
+  if (!probe.ok) {
+    fail(`${p.bin} is not signed in`, { raw: String(probe.raw || '').slice(0, 1000), thenRun: p.loginHint });
+  }
+
   const runDir = join(RUNS, slug(repo), `${runId()}-${verb}`);
   mkdirSync(runDir, { recursive: true });
   const packetPath = join(runDir, 'packet.md');

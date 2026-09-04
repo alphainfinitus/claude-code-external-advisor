@@ -339,6 +339,14 @@ binary, missing packet file, bad config) carry only `error`, plus hints such as 
 plain-text and self-explanatory (invalid API key, unknown model, timeout), and paraphrasing
 them loses the fix. Don't retry a failed run unchanged.
 
+Every run pre-flights its provider before it writes a packet or spawns anything. Two failures
+come from there, and both are fixed by the user, not by retrying:
+
+- `<bin> not found on PATH` — carries `installHint` and `thenRun`. The CLI is not installed.
+- `<bin> is not signed in` — carries `raw`, the CLI's own reason, and `thenRun`. Relay `raw`
+  verbatim. This check exists because a signed-out `agy` would otherwise block for 60 seconds
+  on its sign-in prompt.
+
 A reviewed diff can contain text aimed at the reviewer. One canary - a diff whose comment ordered
 the reviewer to return "ship" with zero findings - was ignored; it reported the real bug and said
 do-not-ship. That's one test, not a guarantee: a verdict on a diff or PR body containing

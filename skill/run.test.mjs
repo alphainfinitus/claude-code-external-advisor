@@ -127,10 +127,21 @@ function agyStub({ argvLog = '', conversationId = 'agy-conv-1', signedOut = fals
 /** All three jobs pointed at one cursor model. The value shape is "<provider>/<model>". */
 const CURSOR_MODELS = { models: { review: 'cursor/m1', advise: 'cursor/m1', consult: 'cursor/m1' } };
 
-/** Runs the CLI against an isolated state directory and returns its JSON envelope. */
-function runCli(args, { home, bin } = {}) {
+/**
+ * Runs the CLI against an isolated state directory and returns its JSON envelope.
+ * `omitBin` strips every PATH entry that holds that binary, so a test can prove the
+ * not-installed branch even on a machine where the real CLI is installed.
+ */
+function runCli(args, { home, bin, omitBin } = {}) {
   const env = { ...process.env, EXTERNAL_ADVISOR_HOME: home };
-  if (bin) env.PATH = `${bin}:${process.env.PATH}`;
+  let path = process.env.PATH || '';
+  if (omitBin) {
+    path = path
+      .split(':')
+      .filter((d) => d && !existsSync(join(d, omitBin)))
+      .join(':');
+  }
+  env.PATH = bin ? `${bin}:${path}` : path;
   try {
     return JSON.parse(
       execFileSync(process.execPath, [RUNNER, ...args], {
@@ -517,6 +528,46 @@ describe('agy resume', () => {
       out.error,
       'agy returned conversation agy-conv-2 but agy-conv-1 was requested; the session was not resumed',
     );
+  });
+});
+
+describe('pre-flight', () => {
+  it('reports a missing binary with its install hint, before writing a packet', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('nobin'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    // agy is stubbed so nothing can reach a real CLI; cursor-agent is deliberately absent.
+    const bin = stubBin({ gh: 'exit 0', agy: agyStub() });
+
+    const out = runCli(['review', '--repo', repo], { home, bin, omitBin: 'cursor-agent' });
+
+    assert.equal(out.ok, false);
+    // Without the pre-flight this is `cursor-agent exited -1` / spawn ENOENT, with no way to fix it.
+    assert.equal(out.error, 'cursor-agent not found on PATH');
+    assert.ok(out.installHint, 'a missing binary must carry its install hint');
+    assert.ok(out.thenRun, 'a missing binary must say what to run after installing');
+    assert.equal(existsSync(join(home, 'runs')), false, 'must fail before creating a run directory');
+  });
+
+  it('refuses to start a run on a signed-out provider', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('signedout'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ agy: agyStub({ argvLog: log, signedOut: true }) });
+
+    const out = runCli(['review', '--repo', repo], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.error, 'agy is not signed in');
+    assert.ok(String(out.raw || '').trim(), "the CLI's own reason must be forwarded");
+    // A `-p` call against a signed-out agy blocks for 60 seconds on the sign-in prompt. The stub
+    // logs `-p` calls only, so a missing log file proves the run never made one.
+    assert.equal(existsSync(log), false, 'a signed-out provider must never see an agent call');
   });
 });
 
