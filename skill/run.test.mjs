@@ -533,6 +533,30 @@ describe('agy resume', () => {
     assert.match(last, /--mode plan/);
   });
 
+  it('resumes on the provider from the run metadata, not the configured one', () => {
+    const home = tmp('home');
+    // Every job is configured for cursor, so only the original run's metadata can send this
+    // resume to agy. A session id is only valid on the CLI that issued it.
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('crossresume'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub({ argvLog: log }) });
+
+    const first = runCli(['review', '--repo', repo, '--model', 'agy/gemini-3.1-pro-high'], { home, bin });
+    assert.equal(first.sessionId, 'agy-conv-1', first.error);
+
+    const out = runCli(['resume', '--repo', repo, '--session', 'agy-conv-1', '--message', 'why?'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    const meta = JSON.parse(readFileSync(join(out.runDir, 'meta.json'), 'utf8'));
+    assert.equal(meta.provider, 'agy');
+    // The agy stub is the only one that logs, so a --conversation line proves which CLI ran.
+    const last = readFileSync(log, 'utf8').trim().split('\n').pop();
+    assert.match(last, /--conversation agy-conv-1/);
+  });
+
   it('fails when agy answers from a different conversation', () => {
     const home = tmp('home');
     writeConfig(home, { models: { review: 'agy/gemini-3.1-pro-high' } });
