@@ -1,20 +1,70 @@
 #!/usr/bin/env bash
 # Installs the external-advisor skill into ~/.claude/skills/.
 # Per-user state (model picks, run history) lives inside the installed skill directory, next to run.mjs.
+# Reinstalling copies the skill files over the old ones and deletes only what this repo no longer
+# ships. config.json and runs/ are skipped on both sides - never copied out of the checkout, never
+# overwritten, moved or removed in the install - so they are untouched at every point.
+# Pass --yes to reinstall without the prompt, which is the only way to run this without a terminal.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skill"
 DEST="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/external-advisor"
 
-if [ -d "$DEST" ]; then
+usage() {
+  echo "Usage: ./install.sh [-y|--yes]"
+  echo
+  echo "  -y, --yes    Reinstall without asking. Required when there is no terminal to ask on."
+  echo
+  echo "Your model picks (config.json) and run history (runs/) are kept either way."
+}
+
+assume_yes=0
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) assume_yes=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $arg" >&2; echo >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ -d "$DEST" ] && [ "$assume_yes" -eq 0 ]; then
+  # Without a terminal `read` either blocks forever or fails on EOF, which set -e turns into a
+  # silent exit 1. Say what to do instead.
+  if [ ! -t 0 ]; then
+    echo "A skill already exists at $DEST, and there is no terminal to ask on." >&2
+    echo "Re-run with --yes to replace the skill files. Your model picks and run history are kept." >&2
+    exit 1
+  fi
   echo "A skill already exists at $DEST"
-  read -r -p "Overwrite it? [y/N] " reply
+  echo "Your model picks (config.json) and run history (runs/) are kept."
+  read -r -p "Replace the rest of it? [y/N] " reply
   [[ "$reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
-  rm -rf "$DEST"
 fi
 
-mkdir -p "$(dirname "$DEST")"
-cp -R "$SRC" "$DEST"
+mkdir -p "$DEST"
+
+# A development checkout has run the skill on itself, so it has its own config.json and runs/ sitting
+# next to run.mjs - that is why .gitignore names them. Pruning them from the source walk keeps a
+# developer's model picks and run history out of everyone else's install.
+while IFS= read -r -d '' rel; do
+  cp -R "$SRC/$rel" "$DEST/"
+done < <(cd "$SRC" && find . -mindepth 1 -maxdepth 1 \( -path ./runs -o -path ./config.json \) -prune -o -print0)
+
+# The old `rm -rf "$DEST"` took config.json and runs/ with it. Copying over the top keeps them, so
+# the leftovers a clean copy used to handle - a prompt or helper this repo no longer ships - have to
+# go by hand. Everything the user owns is pruned from the walk and so is never a deletion candidate.
+# Collect the whole list first: deleting during the walk pulls directories out from under `find`,
+# which then aborts with an fts_read error and leaves the entries it had not reached behind.
+stale=()
+while IFS= read -r -d '' rel; do
+  [ -e "$SRC/$rel" ] || stale[${#stale[@]}]="$rel"
+done < <(cd "$DEST" && find . -mindepth 1 \( -path ./runs -o -path ./config.json \) -prune -o -print0)
+if [ ${#stale[@]} -gt 0 ]; then
+  for rel in "${stale[@]}"; do
+    rm -rf "$DEST/$rel"
+  done
+fi
+
 chmod +x "$DEST/run.mjs"
 echo "Installed to $DEST"
 
