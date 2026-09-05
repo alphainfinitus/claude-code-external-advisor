@@ -593,6 +593,55 @@ describe('research', () => {
     assert.equal(out.ok, false);
     assert.equal(out.error, 'no model configured for research; run setup');
   });
+
+  it('runs a scratch question in a throwaway workspace and leaves the repository alone', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('research-scratch'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.treeChanged, false);
+    const argv = readFileSync(log, 'utf8').trim().split('\n').pop();
+    const ws = argv.match(/--workspace (\S+)/)[1];
+    assert.notEqual(ws, repo, 'a scratch run must not hand over the repository');
+    assert.equal(existsSync(ws), false, 'the scratch workspace must be removed when the run ends');
+    assert.match(
+      readFileSync(out.packetPath, 'utf8'),
+      /There is no project here/,
+      'the packet must tell the model there is no project here',
+    );
+  });
+
+  it('removes the scratch workspace when the run fails', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-scratch-fail'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const cwdLog = join(tmp('cwd'), 'cwd.log');
+    // The auth probe passes, then the agent call records where it ran and dies. Counting leftover
+    // directories instead would pass before --scratch exists, because nothing would be created.
+    const bin = stubBin({
+      agy: [
+        `pwd >> "${cwdLog}"`,
+        `case "$1" in`,
+        `  models) printf 'gemini-3.1-pro-high\\tGemini 3.1 Pro (High)\\n'; exit 0 ;;`,
+        `esac`,
+        `echo 'agy exploded' >&2; exit 1`,
+      ].join('\n'),
+    });
+
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, false, 'the run must fail when the provider dies');
+    const ws = readFileSync(cwdLog, 'utf8').trim().split('\n').pop();
+    assert.match(ws, /external-advisor-scratch/, 'the agent must have run in a scratch workspace');
+    assert.equal(existsSync(ws), false, 'a failed run must not leave its workspace behind');
+  });
 });
 
 describe('agy resume', () => {

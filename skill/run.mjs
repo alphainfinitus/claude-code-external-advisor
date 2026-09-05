@@ -9,7 +9,7 @@
  * Usage:
  *   node run.mjs review  [--repo P] [--pr N] [--base REF] [--task STR] [--model M] [--timeout S]
  *   node run.mjs consult  --packet FILE [--repo P] [--model M] [--timeout S]
- *   node run.mjs research --question STR | --packet FILE [--repo P] [--model M] [--timeout S]
+ *   node run.mjs research --question STR | --packet FILE [--repo P] [--scratch] [--model M] [--timeout S]
  *   node run.mjs advise   [--question STR] [--context FILE] [--repo P] [--model M] [--timeout S]
  *   node run.mjs resume   --session ID --message STR [--repo P] [--model M]
  *   node run.mjs sync-labels
@@ -711,6 +711,57 @@ function preparePr(repo, number) {
   };
 }
 
+/**
+ * A throwaway workspace for research questions that are not about this repository. It goes to the
+ * system temp directory rather than inside the repo, for the same reason PR worktrees do: a
+ * directory under the working tree is still picked up by file watchers, linters and test globs
+ * even when it is gitignored.
+ *
+ * It is a git repository because `treeFingerprint` returns null outside one, and a null
+ * fingerprint means the guard runs over the workspace and verifies nothing. The one empty commit
+ * is for completeness rather than necessity: `git status --porcelain` and `ls-files --others`
+ * already catch a created file with no HEAD, but `git diff HEAD` fails, and `git()` swallows that
+ * failure silently. A HEAD keeps all three parts of the fingerprint real.
+ */
+function prepareScratch() {
+  const dir = join(tmpdir(), 'external-advisor-scratch', `research-${runId()}`);
+  mkdirSync(dir, { recursive: true });
+  gitStrict(dir, ['init', '-q', '-b', 'main']);
+  // Identity and signing come from flags, never from the developer's global config: an empty
+  // commit fails outright where user.email was never set, and blocks on a passphrase prompt where
+  // commit.gpgsign is on globally.
+  gitStrict(dir, [
+    '-c',
+    'user.email=external-advisor@localhost',
+    '-c',
+    'user.name=external-advisor',
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '-q',
+    '--allow-empty',
+    '-m',
+    'scratch',
+  ]);
+
+  // Registered on 'exit' rather than only in a `finally`, so the directory goes away on every
+  // path including signals. rmSync is synchronous, so it still runs inside an exit handler.
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    rmSync(dir, { recursive: true, force: true });
+  };
+  process.on('exit', cleanup);
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => {
+      cleanup();
+      process.exit(sig === 'SIGINT' ? 130 : 143);
+    });
+  }
+  return { dir, cleanup };
+}
+
 async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody, timeoutSeconds, resume, extraMeta }) {
   // Checked before the packet is written or the provider spawns: outside a repo both fingerprints
   // are null, so the run would report `treeChanged: false` having verified nothing.
@@ -1164,30 +1215,45 @@ async function main() {
     if (!question && !packetFile) fail('research requires --question <text> or --packet <file>');
     if (packetFile && !existsSync(packetFile)) fail(`packet file not found: ${packetFile}`);
     const brief = packetFile ? readFileSync(packetFile, 'utf8') : question;
-    const body = [
-      readPrompt('research'),
-      '',
-      '---',
-      '',
-      '## The question',
-      '',
-      brief,
-      '',
-      '## Workspace',
-      '',
-      `The repository at ${repo}. Read it when the question is about this code.`,
-      '',
-    ].join('\n');
+    // Resolved before the workspace is built: a missing models.research would otherwise create a
+    // temp git repo and immediately delete it again.
     const picked = resolveModel(cfg, 'research', args.model);
-    return invoke({
-      cfg,
-      verb: 'research',
-      repo,
-      provider: picked.provider,
-      model: picked.model,
-      packetBody: body,
-      timeoutSeconds,
-    });
+    // --scratch is for questions that are not about this code. The repo stays the run's durable
+    // identity - history bucket and write guard - while the model only ever sees the temp dir.
+    const scratch = args.scratch ? prepareScratch() : null;
+    try {
+      const body = [
+        readPrompt('research'),
+        '',
+        '---',
+        '',
+        '## The question',
+        '',
+        brief,
+        '',
+        '## Workspace',
+        '',
+        scratch
+          ? 'A throwaway empty directory. There is no project here: answer from sources you fetch, not from files.'
+          : `The repository at ${repo}. Read it when the question is about this code.`,
+        '',
+      ].join('\n');
+      return await invoke({
+        cfg,
+        verb: 'research',
+        repo,
+        workspace: scratch ? scratch.dir : undefined,
+        provider: picked.provider,
+        model: picked.model,
+        packetBody: body,
+        timeoutSeconds,
+        // Recorded so a later reader of meta.json knows the model never saw the repository.
+        // `resume` has no workspace flag, so it cannot reproduce a scratch run.
+        extraMeta: scratch ? { scratch: true } : undefined,
+      });
+    } finally {
+      if (scratch) scratch.cleanup();
+    }
   }
 
   if (verb === 'resume') {
