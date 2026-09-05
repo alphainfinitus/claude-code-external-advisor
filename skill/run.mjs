@@ -61,6 +61,12 @@ const PROVIDERS = {
     loginHint: 'cursor-agent login  (opens a browser; the user must run this themselves)',
     readOnly: '--mode ask',
     readOnlyStrength: 'dispatch',
+    // Web reach is declared per CLI, never inferred: `research` runs on whichever provider its
+    // job is configured with, and setup has to be able to say what that CLI can actually reach
+    // before someone picks it. Measured behaviour, not vendor policy - re-check after an upgrade.
+    webAccess: 'restricted',
+    webNote:
+      'URL fetch is dispatched then rejected per URL: cursor.com succeeded while example.com, github.com, docs.anthropic.com and raw.githubusercontent.com were all rejected, which looks like a vendor allow-list. Whether a web search tool exists at all was never measured.',
     // `--mode ask` is verified to refuse writes; `-p` alone still carries write and shell tools.
     // `--trust` is required or headless runs block on the workspace-trust prompt.
     buildArgs({ model, workspace, addDir, sandbox, resume, prompt }) {
@@ -124,6 +130,9 @@ const PROVIDERS = {
     // Plan mode is a slash-command expansion, so it instructs the model rather than refusing a
     // tool call. It also does not survive a resume, which is why it is sent on every call.
     readOnlyStrength: 'prompt',
+    webAccess: 'full',
+    webNote:
+      'search_web and read_url_content are both present and work in plan mode; a chrome-devtools MCP browser is listed too. Measured on agy 1.1.26 on 2026-09-04.',
     buildArgs({ model, addDir, timeoutSeconds, resume, prompt }) {
       // `-p` consumes the next token as the prompt, so the prompt must ride on `-p=` and come
       // first. Putting it last, after the other flags, exits 2 with "--mode" read as the prompt.
@@ -843,6 +852,8 @@ async function doctorReport(cfg, repo) {
       authenticated: false,
       readOnly: p.readOnly,
       readOnlyStrength: p.readOnlyStrength,
+      webAccess: p.webAccess,
+      webNote: p.webNote,
       modelCount: 0,
       models: [],
       modelLabels: {},

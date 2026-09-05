@@ -450,6 +450,19 @@ describe('doctor and labels', () => {
     const onDisk = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'));
     assert.equal(onDisk.modelLabels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
   });
+
+  it('reports each provider web reach so a research model can be picked knowingly', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub() });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    assert.equal(out.providers.agy.webAccess, 'full');
+    assert.equal(out.providers.cursor.webAccess, 'restricted');
+    assert.match(out.providers.cursor.webNote, /allow-list/);
+    assert.ok(out.providers.agy.webNote.length > 0, 'a bare rating with no measurement is not usable');
+  });
 });
 
 describe('cursor argv', () => {
