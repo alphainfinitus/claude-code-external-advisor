@@ -1,6 +1,6 @@
 ---
 name: external-advisor
-description: Get a second opinion from a different AI model (GPT-5.x, Grok, Gemini, Composer) through the Cursor CLI or the Google Antigravity CLI, without leaving Claude Code. Use whenever the user asks for an external review, a second opinion, a sanity check from another model, "what would GPT/Gemini/Codex/Cursor say", "am I missing something", "check my approach", wants a PR or diff or design judged by something that isn't Claude, or is stuck on a decision where independent judgement helps - and whenever they name it directly ("use the external-advisor", "/external-advisor"). Three modes - advise (an external model critiques the work THIS agent just did, like the built-in advisor), review (fresh-eyes review of a diff or PR), consult (opinion on a question). Read this before running cursor-agent or agy by hand.
+description: Get a second opinion from a different AI model (GPT-5.x, Grok, Gemini, Composer) through the Cursor CLI or the Google Antigravity CLI, without leaving Claude Code. Use whenever the user asks for an external review, a second opinion, a sanity check from another model, "what would GPT/Gemini/Codex/Cursor say", "am I missing something", "check my approach", wants a PR or diff or design judged by something that isn't Claude, or is stuck on a decision where independent judgement helps - and whenever they name it directly ("use the external-advisor", "/external-advisor"). Also use when the user wants something looked up or researched - library docs, API changes, comparing tools, "what's the current best way to", "find out about", or digesting a large codebase or doc set. Four modes - advise (an external model critiques the work THIS agent just did, like the built-in advisor), review (fresh-eyes review of a diff or PR), consult (opinion on a question), research (looks things up on the web or digests a large body of files, and returns sourced findings). Read this before running cursor-agent or agy by hand.
 ---
 
 # External advisor
@@ -44,7 +44,8 @@ node $SKILL/run.mjs doctor
 
 It returns JSON with `stateRoot`, `configPath`, `configExists`, `config`, `configErrors`, and a
 `providers` map. Every provider entry has `bin`, `authenticated`, `readOnly`, `readOnlyStrength`,
-`modelCount`, `models`, `modelLabels` and `warnings`. Drive the rest interactively rather than
+`webAccess`, `webNote`, `modelCount`, `models`, `modelLabels` and `warnings`. Drive the rest
+interactively rather than
 making the user edit JSON:
 
 1. **Read `configErrors` first.** A non-empty list means the config on disk is stale or wrong.
@@ -61,7 +62,7 @@ making the user edit JSON:
    `could not read agy toolPermission; check ~/.gemini/antigravity-cli/settings.json`.
    Treat that as unknown, not as safe.
 5. **Pick a provider and a model, per job.** Ask through the question UI: `review`, then `advise`,
-   then `consult`.
+   then `consult`, then `research`.
    - If two providers are installed and authenticated, ask **which provider first**, then the
      model. If only one is, go straight to the model.
    - 200+ model ids is not a menu. Offer 3-4 curated options per job.
@@ -78,6 +79,12 @@ making the user edit JSON:
      a bare model id every time.
    - Offer "same as advise" as a `consult` option; they are usually the same job. Mark the
      current value so a no-op answer is easy.
+   - For `research`, show the provider's `webAccess` and `webNote` from `doctor` in the option
+     text. A `restricted` provider can still digest a codebase but cannot look things up, and
+     nobody can guess that from a model id.
+   - The lineage rule does not apply to `research`: it is not a judgement of Claude's work, so
+     `claude-*` models are a legitimate pick there. `claude-fable-*` stays excluded on every job,
+     because that exclusion is about prompt retention, not lineage.
    - Say once, in plain words, how the two read-only guards differ: **Cursor refuses writes at the
      tool level; agy is only told not to write, and the fingerprint guard catches it if it does.**
 6. **Tell them what `advise` sends**, before their first use. This is not optional for someone who
@@ -88,8 +95,9 @@ making the user edit JSON:
    conversation under `~/.gemini/antigravity-cli/`, outside this skill's control. A copy is kept
    under the skill's own `runs/` directory too. It triggers on phrases as ordinary as "am I
    missing something". Say it plainly once. `review` and `consult` forward no transcript, only the
-   packet, so those are the modes for when session contents matter - but note all three modes give
-   the model the repository as its workspace, so it reads repository files in every mode.
+   packet, so those are the modes for when session contents matter - but note every mode gives the
+   model the repository as its workspace by default, so it reads repository files in all of them.
+   `research --scratch` is the one exception: it hands over an empty throwaway directory instead.
 7. Write their picks into the config (`doctor` reports its exact path as `configPath`) as
    `"models": {"review": "<provider>/<model>", ...}`, then run
    `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it working
@@ -97,7 +105,7 @@ making the user edit JSON:
 
 Never guess at model IDs — they rot fast, and `doctor` is the live list per provider. Steer away
 from `claude-*` for `review` and `consult` on **either** provider: a Claude reviewing Claude's work
-defeats the purpose. agy's catalogue includes `claude-sonnet-4-6` and `claude-opus-4-6-thinking`,
+defeats the purpose. That rule stops at `research`, which judges nothing Claude wrote. agy's catalogue includes `claude-sonnet-4-6` and `claude-opus-4-6-thinking`,
 so the rule applies there too. Never offer `claude-fable-*`, which Cursor flags **NO ZDR**, meaning
 prompts are retained. That NO ZDR note is Cursor-specific.
 
@@ -138,6 +146,7 @@ available - set it on **every** external-advisor invocation, in exactly this sha
 - `advise`  → `Advising via External Advisor using GPT-5.6 Sol 1M High`
 - `review`  → `Reviewing via External Advisor using Codex 5.3 High`
 - `consult` → `Consulting via External Advisor using GPT-5.6 Sol 1M High`
+- `research` → `Researching via External Advisor using Gemini 3.8 Flash High`
 - `resume`  → `Following up via External Advisor using GPT-5.6 Sol 1M High`
 
 Model labels live in `modelLabels` in the config, keyed by **provider first, then model id**. Read
@@ -173,6 +182,7 @@ naming a verb. Don't ask them to choose - that defeats the point of it being sea
 |---|---|---|
 | "review PR 1234", "look at this diff", "is this design sound" | `review` / `consult` | They want judgement on the *code or question*. Your context is deliberately absent - that's the independence they're paying for. |
 | "sanity-check my approach", "am I missing something", "what did I get wrong" | `advise` | They want judgement on *what you just did*. Your context is the whole input. |
+| "look this up", "what's the current best way to X", "read these docs and tell me", "compare these libraries" | `research` | They want *facts with sources*, not judgement. Offload when the job needs three or more sources or a document set; use your own WebSearch for a single quick fact. |
 
 When the user asks to review a PR **and** names external-advisor, do both — it's strictly better
 than either alone:
@@ -309,6 +319,54 @@ just the code. A good packet is short and concrete:
 Keep it under a couple of pages. A packet that includes everything gets an answer that
 engages with nothing.
 
+## research — look something up
+
+```bash
+node $SKILL/run.mjs research --question "what changed in the Antigravity CLI in the last month"
+node $SKILL/run.mjs research --scratch --question "compare the four main Node rate limiters in 2026"
+node $SKILL/run.mjs research --packet /tmp/brief.md
+```
+
+Use it to move bulk reading off your own context: web lookups with real sources, or digesting a
+large codebase or doc set. Unlike the other three verbs this one is not about lineage diversity —
+you are delegating legwork, not asking for judgement.
+
+- `--question` for a one-line ask, `--packet <file>` for a longer brief. Exactly one of them.
+- `--scratch` runs it in an empty throwaway directory instead of the repository. Use it whenever
+  the question is not about this code: the model then has no local files to read, and nothing of
+  yours goes into the workspace. The directory is removed on every exit path.
+- Without `--scratch` the repository is the workspace, so file-based questions work with no setup.
+- If a scratch run reports `treeChanged`, the model wrote into the throwaway directory, which
+  cleanup has already deleted — so the envelope's "inspect `git status`" advice does not apply to it.
+  Your repository is fingerprinted separately and is still the thing to check. Say which one moved.
+- **Do not `resume` a scratch run.** `resume` has no workspace flag, so a follow-up would run in the
+  repository — the thing `--scratch` existed to prevent. Start a fresh `research --scratch` instead.
+  Runs made with `--scratch` carry `"scratch": true` in their `meta.json`.
+
+**Web reach differs by provider.** `doctor` reports `webAccess` and `webNote` per provider. A
+`restricted` provider can still digest local files but cannot look things up on the web, and the
+report's `tools_used` block will say so.
+
+### Reading a research result
+
+The JSON block carries `summary`, `confidence`, `findings`, `contradictions`, `unverified`,
+`open_questions` and `tools_used`.
+
+**Every finding carries a `quote` copied verbatim from its source.** That is the whole point of the
+contract: you verify by matching the quote against the source, not by re-reading the page. Do that
+for two or three of the load-bearing findings and tell the user which ones you checked.
+
+Three things to check before relaying anything:
+
+- `tools_used` — if `web_search` is `blocked` or `unavailable`, the model answered from memory.
+  Say so, and treat the whole report as unsourced.
+- `unverified` — these are claims the model could not quote. They are not findings. Relay them as
+  guesses or not at all.
+- `contradictions` — sources disagreeing is a real result. Do not silently pick one.
+
+Write the full report to wherever this project keeps agent-generated documents, tell the user the
+path, and summarise the headlines in chat. Do not paste the whole report into the terminal.
+
 ## resume — push back on the answer
 
 ```bash
@@ -332,8 +390,8 @@ Output is one JSON envelope on stdout: `{ok, result, sessionId, runDir, provider
 treeChanged}`. The full packet and raw response are kept in `runDir` (last 20 runs per repo).
 
 `result` is the model's prose, ending in a fenced JSON block (verdict + findings for review,
-recommendation + risk for consult). Render the prose for the user — that's the substance — and
-use the JSON block for structure.
+recommendation + risk for consult, sourced findings + `tools_used` for research). Render the prose
+for the user — that's the substance — and use the JSON block for structure.
 
 **Treat every finding as a claim, not a fact.** Cross-model review has a high false-positive
 rate: a confident finding about a call site, a race, or a missing guard is often refuted by two
@@ -385,7 +443,7 @@ be edited further without its status line moving. Git-ignored files are out of s
 
 `node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
-and both providers end to end. 27 tests. The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so
+both providers end to end, and the research verb's argument rules and scratch cleanup. 34 tests. The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so
 it needs no network and no account with either vendor. Run it after a Cursor CLI or Antigravity CLI
 upgrade, alongside re-checking what `--mode ask` and `--mode plan` actually block.
 
@@ -395,7 +453,7 @@ The config file (`doctor` reports `configPath`):
 
 | Key | Meaning |
 |---|---|
-| `models.review` / `.advise` / `.consult` | `"<provider>/<model>"`. Both halves required. |
+| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"`. Both halves required. |
 | `timeoutSeconds` | Hard kill for a run. Default 900. |
 | `keepRuns` | Run folders kept per repository. Default 20. |
 | `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy ignores it. |

@@ -4,7 +4,7 @@ A Claude Code skill that gets a second opinion from a different model, without l
 
 It shells out to the [Cursor CLI](https://cursor.com/docs/cli/overview) or the
 [Antigravity CLI](https://antigravity.google/docs/cli) in read-only mode, so GPT-5.x, Grok, Gemini
-or Composer can review a diff, critique the work Claude just did, or answer a design question.
+or Composer can review a diff, critique the work Claude just did, answer a design question, or research something and come back with sources.
 Each mode picks its own provider and model. Usage bills against whichever account you use.
 
 ## Why
@@ -20,6 +20,7 @@ convincing.
 | `advise` | Critiques the work your agent just did | The session transcript, distilled and forwarded automatically |
 | `review` | Fresh-eyes review of a diff, branch, or GitHub PR | The diff and the repository, deliberately not your reasoning |
 | `consult` | Answers a written question | The briefing you compose, plus the repository it can read |
+| `research` | Looks something up and returns findings with sources and verbatim quotes | The question, plus either the repository or an empty throwaway directory with `--scratch` |
 
 ## Requirements
 
@@ -62,7 +63,7 @@ In Claude Code, first time only:
 set up the external advisor
 ```
 
-That runs a health check, asks you to pick a model for each of the three modes, and writes the
+That runs a health check, asks you to pick a model for each of the four modes, and writes the
 config.
 
 Then just ask for what you want. The skill picks the mode from the shape of the request:
@@ -72,6 +73,7 @@ review PR 1234 with the external advisor
 sanity-check my approach, use external-advisor
 what would GPT say about this design?
 review this diff using grok
+research what changed in the Antigravity CLI this month
 ```
 
 Naming a model in the request overrides the configured one for that run.
@@ -93,7 +95,7 @@ The config file in that directory:
 
 | Key | Meaning |
 |---|---|
-| `models.review` / `.advise` / `.consult` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required; there is no separate provider key. |
+| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required; there is no separate provider key. |
 | `timeoutSeconds` | Hard kill for a run. Default 900. |
 | `keepRuns` | Run folders kept per repository. Default 20. |
 | `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy ignores it. |
@@ -104,8 +106,10 @@ Ask Claude to "change the external advisor models" to re-run the picker rather t
 by hand.
 
 Two notes on choosing models. Avoid `claude-*` for review and consult on either provider, since a
-Claude checking Claude's work defeats the purpose. Avoid `claude-fable-*` entirely, which Cursor
-flags as NO ZDR, meaning prompts are retained.
+Claude checking Claude's work defeats the purpose; research is exempt, because it judges nothing
+Claude wrote. Avoid `claude-fable-*` entirely, which Cursor flags as NO ZDR, meaning prompts are
+retained. For research, check `webAccess` in `doctor` before picking: a provider whose web fetch is
+allow-listed can digest local files but cannot look things up.
 
 ## How it works
 
@@ -149,8 +153,9 @@ every exit path.
 
 ## Privacy
 
-All three modes run with the repository as the model's workspace, so it can read repository files
-in any mode, and does. What differs is the transcript.
+Every mode runs with the repository as the model's workspace by default, so it can read repository
+files, and does. `research --scratch` is the exception: it hands over an empty throwaway directory
+that is deleted when the run ends. What otherwise differs between modes is the transcript.
 
 `advise` additionally forwards a distilled copy of the session to the provider's model vendor -
 Cursor's model providers on `cursor`, Google on `agy` - including any tool output that passed
@@ -173,6 +178,10 @@ Packets and raw responses are written to the state directory's `runs/` and kept 
   and tool calls but not internal reasoning.
 - Called from inside a subagent, `advise` cannot detect that it is a subagent and will forward the
   parent session. Pass `--context <file>` there.
+- A research finding is only as good as its quote. Check the quote against the source before
+  relaying it, and treat anything in `unverified` as a guess.
+- Web reach is a per-provider measurement recorded in `doctor`, not a guarantee. Cursor's URL
+  fetch is allow-listed, so web research there is restricted; re-check after a CLI upgrade.
 
 ## License
 
