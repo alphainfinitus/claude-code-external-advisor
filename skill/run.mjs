@@ -52,8 +52,14 @@ const DEFAULT_CONFIG = {
  * `buildArgs` must produce a read-only invocation, and it returns the FULL argv including the
  * prompt, because the CLIs disagree about where the prompt goes. `readOnlyStrength` says how
  * strong that guard is: "dispatch" means the CLI refuses the tool call, "prompt" means the model
- * is only told not to write. `parse` returns the normalized {ok, text, sessionId, usage, error},
- * so nothing downstream knows which CLI ran.
+ * is only told not to write. `webAccess` says how much of the web that CLI reached when it was
+ * last tried: "full" means both web search and URL fetch worked, "restricted" means at least one
+ * of them is limited or was never proven, and `webNote` carries the detail with the date. Both are
+ * measurements of what the CLI did, not vendor policy, so re-measure after a CLI upgrade. They are
+ * declared per CLI and never inferred, because `research` runs on whichever provider its job is
+ * configured with and setup has to say what that CLI can reach before someone picks it.
+ * `parse` returns the normalized {ok, text, sessionId, usage, error}, so nothing downstream knows
+ * which CLI ran.
  */
 const PROVIDERS = {
   cursor: {
@@ -62,9 +68,6 @@ const PROVIDERS = {
     loginHint: 'cursor-agent login  (opens a browser; the user must run this themselves)',
     readOnly: '--mode ask',
     readOnlyStrength: 'dispatch',
-    // Web reach is declared per CLI, never inferred: `research` runs on whichever provider its
-    // job is configured with, and setup has to be able to say what that CLI can actually reach
-    // before someone picks it. Measured behaviour, not vendor policy - re-check after an upgrade.
     webAccess: 'restricted',
     webNote:
       'URL fetch is dispatched then rejected per URL: cursor.com succeeded while example.com, github.com, docs.anthropic.com and raw.githubusercontent.com were all rejected, which looks like a vendor allow-list. Whether a web search tool exists at all was never measured.',
@@ -133,7 +136,7 @@ const PROVIDERS = {
     readOnlyStrength: 'prompt',
     webAccess: 'full',
     webNote:
-      'search_web and read_url_content are both present and work in plan mode; a chrome-devtools MCP browser is listed too. Search and fetch re-measured on agy 1.1.27 on 2026-09-05.',
+      'search_web and read_url_content are both present and work in plan mode, re-measured on agy 1.1.27 on 2026-09-05. A chrome-devtools MCP browser was listed alongside them on agy 1.1.26 on 2026-09-04 and has not been re-measured since.',
     buildArgs({ model, addDir, timeoutSeconds, resume, prompt }) {
       // `-p` consumes the next token as the prompt, so the prompt must ride on `-p=` and come
       // first. Putting it last, after the other flags, exits 2 with "--mode" read as the prompt.
@@ -745,31 +748,41 @@ function prepareScratch() {
     });
   }
 
-  mkdirSync(dir, { recursive: true });
-  gitStrict(dir, ['init', '-q', '-b', 'main']);
-  // Identity and signing come from flags, never from the developer's global config: an empty
-  // commit fails outright where user.email was never set, and blocks on a passphrase prompt where
-  // commit.gpgsign is on globally. Hooks are repo-external here - a global core.hooksPath, or one
-  // copied in by init.templateDir - so they are disabled twice over. --no-verify alone is not
-  // enough: it skips pre-commit and commit-msg but not prepare-commit-msg, which still runs
-  // against this empty commit and fails the whole research run over someone else's checks.
-  // core.hooksPath then points somewhere that cannot hold a hook, so git finds nothing to run.
-  gitStrict(dir, [
-    '-c',
-    'user.email=external-advisor@localhost',
-    '-c',
-    'user.name=external-advisor',
-    '-c',
-    'commit.gpgsign=false',
-    '-c',
-    'core.hooksPath=/dev/null',
-    'commit',
-    '-q',
-    '--allow-empty',
-    '--no-verify',
-    '-m',
-    'scratch',
-  ]);
+  // Every other failure in this file is reported by fail() as a sentence. Left to throw, a broken
+  // global git config reached main()'s catch and printed a raw JS stack as the `error` string.
+  try {
+    mkdirSync(dir, { recursive: true });
+    gitStrict(dir, ['init', '-q', '-b', 'main']);
+    // Identity and signing come from flags, never from the developer's global config: an empty
+    // commit fails outright where user.email was never set, and blocks on a passphrase prompt
+    // where commit.gpgsign is on globally. Hooks are repo-external here - a global core.hooksPath,
+    // or one copied in by init.templateDir - so they are disabled twice over. --no-verify alone is
+    // not enough: it skips pre-commit and commit-msg but not prepare-commit-msg, which still runs
+    // against this empty commit and fails the whole research run over someone else's checks.
+    // core.hooksPath then points somewhere that cannot hold a hook, so git finds nothing to run.
+    gitStrict(dir, [
+      '-c',
+      'user.email=external-advisor@localhost',
+      '-c',
+      'user.name=external-advisor',
+      '-c',
+      'commit.gpgsign=false',
+      '-c',
+      'core.hooksPath=/dev/null',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '--no-verify',
+      '-m',
+      'scratch',
+    ]);
+  } catch (e) {
+    fail(
+      `could not create the scratch workspace at ${dir}: ${String(e.stderr || e.message)
+        .trim()
+        .slice(0, 300)}`,
+    );
+  }
 
   return { dir, cleanup };
 }
@@ -1009,6 +1022,13 @@ async function main() {
   const cfg = loadConfig();
   const timeoutSeconds = Number(args.timeout || cfg.timeoutSeconds);
 
+  // parseArgs accepts any --flag, so `resume --scratch` and `consult --scratch` parsed cleanly and
+  // did nothing at all: the user read about the flag, typed it, and got silence.
+  // A missing verb falls through to the verb list below, which is the more useful message.
+  if (args.scratch && verb && verb !== 'research') {
+    fail(`--scratch is not supported by "${verb}"; only research runs in a throwaway workspace`);
+  }
+
   // Doctor's whole job is to report a broken config, so it is the one verb that may load one.
   if (verb !== 'doctor') {
     const errs = configErrors(cfg);
@@ -1219,8 +1239,12 @@ async function main() {
   }
 
   if (verb === 'research') {
-    const question = args.question && args.question !== true ? String(args.question) : null;
-    const packetFile = args.packet && args.packet !== true ? String(args.packet) : null;
+    // A flag with no value parses as `true`. Reading that as "absent" dropped it in silence:
+    // `--question q --packet` answered the question and ignored the file the user meant to pass.
+    if (args.question === true) fail('research --question was given no text; write --question <text>');
+    if (args.packet === true) fail('research --packet was given no file; write --packet <file>');
+    const question = args.question ? String(args.question) : null;
+    const packetFile = args.packet ? String(args.packet) : null;
     // Exactly one source. Accepting both would silently drop one, and the caller would have no way
     // to tell which question the model actually answered.
     if (question && packetFile) fail('research takes --question or --packet, not both');

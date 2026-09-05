@@ -138,10 +138,12 @@ const CURSOR_MODELS = { models: { review: 'cursor/m1', advise: 'cursor/m1', cons
 /**
  * Runs the CLI against an isolated state directory and returns its JSON envelope.
  * `omitBin` strips every PATH entry that holds that binary, so a test can prove the
- * not-installed branch even on a machine where the real CLI is installed.
+ * not-installed branch even on a machine where the real CLI is installed. `env` adds variables for
+ * the child alone - the object below is a fresh copy, so a value hostile to git cannot reach the
+ * `git()` and `commit()` helpers, which run in this process.
  */
-function runCli(args, { home, bin, omitBin } = {}) {
-  const env = { ...process.env, EXTERNAL_ADVISOR_HOME: home };
+function runCli(args, { home, bin, omitBin, env: extraEnv } = {}) {
+  const env = { ...process.env, EXTERNAL_ADVISOR_HOME: home, ...extraEnv };
   let path = process.env.PATH || '';
   if (omitBin) {
     path = path
@@ -690,6 +692,106 @@ describe('research', () => {
 
     assert.equal(out.ok, true, out.error);
     assert.match(readFileSync(log, 'utf8').trim().split('\n').pop(), /--conversation agy-conv-1/);
+  });
+
+  it('refuses a --packet that was typed with no file', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-bare-packet'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+
+    // A flag with no value parses as `true`. Read as "absent", this answered the question and
+    // silently dropped the --packet the user typed.
+    const out = runCli(['research', '--repo', repo, '--question', 'q', '--packet'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /--packet was given no file/);
+    assert.equal(existsSync(join(home, 'runs')), false, 'must reject before writing a packet');
+  });
+
+  it('fails when --packet names a file that is not there', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-missing-packet'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+
+    const out = runCli(['research', '--repo', repo, '--packet', join(repo, 'gone.md')], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /packet file not found/);
+    assert.equal(existsSync(join(home, 'runs')), false, 'must reject before writing a packet');
+  });
+
+  it('refuses --scratch on a verb that never reads it', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('scratch-wrong-verb'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'q.md'), 'question');
+    const bin = stubBin({ 'cursor-agent': cursorStub() });
+
+    // parseArgs accepts any --flag, so this used to parse cleanly and run in the repository with
+    // no hint that the flag did nothing.
+    const out = runCli(['consult', '--repo', repo, '--scratch', '--packet', join(repo, 'q.md')], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /--scratch is not supported by "consult"/);
+    assert.match(out.error, /only research/, 'the refusal must name the verb that does support it');
+    assert.equal(existsSync(join(home, 'runs')), false, 'must reject before writing a packet');
+  });
+
+  it('reports a scratch workspace it could not build as a sentence, not a stack trace', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-scratch-broken'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+    // An unparseable global config fails `git init` inside the scratch directory. Left to throw,
+    // that reached main()'s catch and the user read a JS stack as the `error` string.
+    const gitconfig = join(tmp('gitconfig'), 'gitconfig');
+    writeFileSync(gitconfig, '[core\n');
+
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], {
+      home,
+      bin,
+      env: { GIT_CONFIG_GLOBAL: gitconfig },
+    });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /could not create the scratch workspace/);
+    assert.match(out.error, /bad config line/, "git's own reason must survive into the message");
+    assert.doesNotMatch(out.error, /run\.mjs:\d+/, 'a stack frame is not a user-facing error');
+  });
+
+  it('commits the scratch workspace through a repo-external hook that always fails', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-scratch-hooks'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+    // --no-verify skips pre-commit and commit-msg but not prepare-commit-msg, so a global
+    // core.hooksPath failed the scratch commit over someone else's checks. Only the `-c
+    // core.hooksPath=/dev/null` in prepareScratch defeats this hook.
+    const hooks = join(tmp('hooks'), 'hooks');
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, 'prepare-commit-msg'), '#!/bin/sh\necho "hostile hook ran" >&2\nexit 1\n');
+    chmodSync(join(hooks, 'prepare-commit-msg'), 0o755);
+    const gitconfig = join(tmp('gitconfig'), 'gitconfig');
+    writeFileSync(gitconfig, `[core]\n\thooksPath = ${hooks}\n`);
+
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], {
+      home,
+      bin,
+      env: { GIT_CONFIG_GLOBAL: gitconfig },
+    });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.scratch, true, 'the run must still have used a throwaway workspace');
   });
 });
 
