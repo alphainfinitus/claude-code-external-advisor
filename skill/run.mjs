@@ -725,27 +725,11 @@ function preparePr(repo, number) {
  */
 function prepareScratch() {
   const dir = join(tmpdir(), 'external-advisor-scratch', `research-${runId()}`);
-  mkdirSync(dir, { recursive: true });
-  gitStrict(dir, ['init', '-q', '-b', 'main']);
-  // Identity and signing come from flags, never from the developer's global config: an empty
-  // commit fails outright where user.email was never set, and blocks on a passphrase prompt where
-  // commit.gpgsign is on globally.
-  gitStrict(dir, [
-    '-c',
-    'user.email=external-advisor@localhost',
-    '-c',
-    'user.name=external-advisor',
-    '-c',
-    'commit.gpgsign=false',
-    'commit',
-    '-q',
-    '--allow-empty',
-    '-m',
-    'scratch',
-  ]);
 
-  // Registered on 'exit' rather than only in a `finally`, so the directory goes away on every
-  // path including signals. rmSync is synchronous, so it still runs inside an exit handler.
+  // Registered before the directory exists, and on 'exit' rather than only in a `finally`, so it
+  // covers every path: signals, and a failure inside this function before it ever returns a
+  // cleanup for the caller to call. rmSync is synchronous, so it still runs inside an exit
+  // handler, and `force` makes a directory that was never created a no-op rather than an error.
   let cleaned = false;
   const cleanup = () => {
     if (cleaned) return;
@@ -759,6 +743,29 @@ function prepareScratch() {
       process.exit(sig === 'SIGINT' ? 130 : 143);
     });
   }
+
+  mkdirSync(dir, { recursive: true });
+  gitStrict(dir, ['init', '-q', '-b', 'main']);
+  // Identity and signing come from flags, never from the developer's global config: an empty
+  // commit fails outright where user.email was never set, and blocks on a passphrase prompt where
+  // commit.gpgsign is on globally. That flag does not suppress hooks, so --no-verify is separate
+  // and necessary: a global core.hooksPath or an init.templateDir hook is repo-external, runs
+  // against this empty commit, and fails the run over someone else's pre-commit checks.
+  gitStrict(dir, [
+    '-c',
+    'user.email=external-advisor@localhost',
+    '-c',
+    'user.name=external-advisor',
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '-q',
+    '--allow-empty',
+    '--no-verify',
+    '-m',
+    'scratch',
+  ]);
+
   return { dir, cleanup };
 }
 
