@@ -82,8 +82,10 @@ interactively rather than making the user edit JSON:
    - Offer "same as advise" as a `consult` option; they are usually the same job. Mark the
      current value so a no-op answer is easy.
    - For `research`, show the provider's `webAccess` and `webNote` from `doctor` in the option
-     text. `restricted` means URL fetch is allow-listed, so treat web lookups there as unreliable;
-     the provider can still digest a codebase. Nobody can guess that from a model id.
+     text. `restricted` means that provider's web reach was measured to be limited, so treat web
+     lookups there as unreliable; the limit differs per provider, and its `webNote` is the record
+     of what was measured. Any provider can still digest a codebase. Nobody can guess that from a
+     model id.
    - The lineage rule does not apply to `research`: it is not a judgement of Claude's work, so
      `claude-*` models are a legitimate pick there. `claude-fable-*` stays excluded on every job,
      because that exclusion is about prompt retention, not lineage.
@@ -101,8 +103,10 @@ interactively rather than making the user edit JSON:
    every mode gives the model the repository as its workspace by default, so it reads repository
    files in all of them. `research --scratch` is the one exception, and so the most private of the
    four: it hands over an empty throwaway directory instead of the repository. Not nothing, though:
-   the model is still handed the run directory, whose path contains the repository's name, and on
-   `agy` the workspace is only the process working directory, so nothing stops a read outside it.
+   the model is still handed the run directory, whose path sits under the skill's state directory -
+   by default inside the user's home, so it carries their username as well as the repository's
+   name - and on `agy` the workspace is only the process working directory, so nothing stops a read
+   outside it.
 7. Write their picks into the config (`doctor` reports its exact path as `configPath`) as
    `"models": {"review": "<provider>/<model>", ...}`, then run
    `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it working
@@ -188,7 +192,7 @@ naming a verb. Don't ask them to choose - that defeats the point of it being sea
 |---|---|---|
 | "review PR 1234", "look at this diff", "is this design sound" | `review` / `consult` | They want judgement on the *code or question*. Your context is deliberately absent - that's the independence they're paying for. |
 | "sanity-check my approach", "am I missing something", "what did I get wrong" | `advise` | They want judgement on *what you just did*. Your context is the whole input. |
-| "look this up", "what's the current best way to X", "read these docs and tell me", "compare these libraries" | `research` | They want *facts with sources*, not judgement. Offload when the job needs three or more sources or a document set; use your own WebSearch for a single quick fact. |
+| "look this up", "what's the current best way to X", "read these docs and tell me", "compare these libraries" | `research` | They want *facts with sources*, not judgement. |
 
 When the user asks to review a PR **and** names external-advisor, do both — it's strictly better
 than either alone:
@@ -337,6 +341,9 @@ Use it to move bulk reading off your own context: web lookups with real sources,
 large codebase or doc set. Unlike the other three verbs this one is not about lineage diversity —
 you are delegating legwork, not asking for judgement.
 
+Offload when the job needs three or more sources, or a whole document set. For a single quick fact,
+use your own WebSearch: a run costs 30-150s, which is not worth paying to look up one number.
+
 - `--question` for a one-line ask, `--packet <file>` for a longer brief. Exactly one of them.
 - `--scratch` runs it in an empty throwaway directory instead of the repository. Use it whenever
   the question is not about this code: the model then has no local files to read, and nothing of
@@ -353,10 +360,12 @@ you are delegating legwork, not asking for judgement.
   A scratch run's envelope carries `"scratch": true`, and so does its `meta.json`, which is how
   the refusal recognises one.
 
-**Web reach differs by provider.** `doctor` reports `webAccess` and `webNote` per provider. On a
-`restricted` provider, URL fetch is allow-listed and whether a search tool exists was never
-measured, so treat web lookups there as unreliable; digesting local files still works. Read
-`webNote` for what was actually measured, and check the report's `tools_used` block afterwards.
+**Web reach differs by provider.** `doctor` reports `webAccess` and `webNote` per provider.
+`restricted` means that provider's web reach was measured to be limited. What the limit is differs
+from provider to provider, so read its `webNote` for what was actually measured. Treat web lookups
+on a `restricted` provider as unreliable; digesting local files still works either way. Cursor is
+the only `restricted` provider today; its `webNote` records an allow-list on URL fetch, and a
+search tool that was never measured. Check the report's `tools_used` block afterwards.
 
 ### Reading a research result
 
@@ -371,7 +380,7 @@ Search the whole file, not the cited line. Measured, a `path:line` citation land
 two of the quote rather than exactly on it, so grepping only the cited line can make a real,
 verbatim quote look invented.
 
-Three things to check before relaying anything:
+Four things to check before relaying anything:
 
 - `tools_used` — if `web_search` is `blocked` or `unavailable`, the model answered from memory.
   Say so, and treat the whole report as unsourced. An `ok` there confirms nothing: `agy
@@ -379,6 +388,9 @@ Three things to check before relaying anything:
   for what it did. That is exactly why every finding has to carry a quote.
 - `unverified` — these are claims the model could not quote. They are not findings. Relay them as
   guesses or not at all.
+- the prose — a claim that appears there and in no `finding` carries no source and no quote, so it
+  is unverified by construction. Treat it exactly like an entry in `unverified`. Seen live: the
+  prose said local commands had been run, with nothing in `findings` to show for it.
 - `contradictions` — sources disagreeing is a real result. Do not silently pick one.
 
 Write the full report to wherever this project keeps agent-generated documents, tell the user the
@@ -465,7 +477,7 @@ be edited further without its status line moving. Git-ignored files are out of s
 
 `node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
-both providers end to end, and the research verb's argument rules and scratch cleanup. 36 tests.
+both providers end to end, and the research verb's argument rules and scratch cleanup. 41 tests.
 The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so it needs no network and no account with
 either vendor. Run it after a Cursor CLI or Antigravity CLI upgrade, alongside re-checking what
 `--mode ask` and `--mode plan` actually block.

@@ -109,9 +109,10 @@ by hand.
 Two notes on choosing models. Avoid `claude-*` for review and consult on either provider, since a
 Claude checking Claude's work defeats the purpose; research is exempt, because it judges nothing
 Claude wrote. Avoid `claude-fable-*` entirely, which Cursor flags as NO ZDR, meaning prompts are
-retained. For research, check `webAccess` in `doctor` before picking: on a `restricted` provider
-URL fetch is allow-listed and whether a web search tool exists was never measured, so web lookups
-there are unreliable. Digesting local files still works.
+retained. For research, check `webAccess` in `doctor` before picking: `restricted` means that
+provider's web reach was measured to be limited, so web lookups there are unreliable. What the
+limit actually is differs per provider and is recorded in its `webNote`. Digesting local files
+still works either way.
 
 ## How it works
 
@@ -169,8 +170,10 @@ through it, and keeps a copy on disk. `agy` also keeps a full copy of every conv
 `review`, `consult` and `research` forward no transcript, only the packet you or the skill
 composed, so those are the modes to use when session contents matter. `research --scratch` is the
 most private of the four: no transcript, and not even the repository. Not nothing, though. The
-model is still handed the run directory, and that path contains this repository's name. On `agy`
-the workspace is only the process working directory, so nothing stops a read outside it.
+model is still handed the run directory, a path under the skill's state directory - which by
+default sits in your home directory, so it carries your username as well as this repository's
+name. On `agy` the workspace is only the process working directory, so nothing stops a read
+outside it.
 
 Packets and raw responses are written to the state directory's `runs/` and kept for the last
 `keepRuns` runs per repository. They contain full diffs.
@@ -188,8 +191,9 @@ Packets and raw responses are written to the state directory's `runs/` and kept 
   parent session. Pass `--context <file>` there.
 - A research finding is only as good as its quote. Check the quote against the source before
   relaying it, and treat anything in `unverified` as a guess.
-- Web reach is a per-provider measurement recorded in `doctor`, not a guarantee. Cursor's URL
-  fetch is allow-listed, so web research there is restricted; re-check after a CLI upgrade.
+- Web reach is a per-provider measurement recorded in `doctor`, not a guarantee. A `restricted`
+  rating means that provider's reach was measured to be limited, and its `webNote` says how;
+  Cursor's is an allow-list on URL fetch. Re-check after a CLI upgrade.
 
 ## License
 
