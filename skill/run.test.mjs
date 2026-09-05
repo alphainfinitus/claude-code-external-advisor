@@ -606,6 +606,7 @@ describe('research', () => {
 
     assert.equal(out.ok, true, out.error);
     assert.equal(out.treeChanged, false);
+    assert.equal(out.scratch, true, 'the envelope must mark the run as scratch');
     const argv = readFileSync(log, 'utf8').trim().split('\n').pop();
     const ws = argv.match(/--workspace (\S+)/)[1];
     assert.notEqual(ws, repo, 'a scratch run must not hand over the repository');

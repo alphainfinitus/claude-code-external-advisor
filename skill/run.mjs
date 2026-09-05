@@ -749,9 +749,11 @@ function prepareScratch() {
   gitStrict(dir, ['init', '-q', '-b', 'main']);
   // Identity and signing come from flags, never from the developer's global config: an empty
   // commit fails outright where user.email was never set, and blocks on a passphrase prompt where
-  // commit.gpgsign is on globally. That flag does not suppress hooks, so --no-verify is separate
-  // and necessary: a global core.hooksPath or an init.templateDir hook is repo-external, runs
-  // against this empty commit, and fails the run over someone else's pre-commit checks.
+  // commit.gpgsign is on globally. Hooks are repo-external here - a global core.hooksPath, or one
+  // copied in by init.templateDir - so they are disabled twice over. --no-verify alone is not
+  // enough: it skips pre-commit and commit-msg but not prepare-commit-msg, which still runs
+  // against this empty commit and fails the whole research run over someone else's checks.
+  // core.hooksPath then points somewhere that cannot hold a hook, so git finds nothing to run.
   gitStrict(dir, [
     '-c',
     'user.email=external-advisor@localhost',
@@ -759,6 +761,8 @@ function prepareScratch() {
     'user.name=external-advisor',
     '-c',
     'commit.gpgsign=false',
+    '-c',
+    'core.hooksPath=/dev/null',
     'commit',
     '-q',
     '--allow-empty',
