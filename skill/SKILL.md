@@ -23,7 +23,10 @@ instruction to the model. Neither is a security boundary.
 
 On agy, plan mode leaves the full tool list in place: file write, shell, subagents, web search,
 browser control and MCP tools all stay listed (measured on agy 1.1.26). Only the instruction and
-the fingerprint guard stand between the model and a write. Both providers can spawn their own
+the fingerprint guard stand between the model and a write, and the instruction has been seen to
+fail: on 2026-09-05, on agy 1.1.27, a read-only review run wrote an `AGENTS.md` into the repository
+root that nobody had asked for. One observed instance, not a rate. The fingerprint guard caught it
+and failed the run. Both providers can spawn their own
 subagents; on agy, whether a subagent inherits plan mode was not measured.
 
 Two further layers back them up:
@@ -97,7 +100,9 @@ interactively rather than making the user edit JSON:
    transcript, only the packet, so those are the modes for when session contents matter - but note
    every mode gives the model the repository as its workspace by default, so it reads repository
    files in all of them. `research --scratch` is the one exception, and so the most private of the
-   four: it hands over an empty throwaway directory instead of the repository.
+   four: it hands over an empty throwaway directory instead of the repository. Not nothing, though:
+   the model is still handed the run directory, whose path contains the repository's name, and on
+   `agy` the workspace is only the process working directory, so nothing stops a read outside it.
 7. Write their picks into the config (`doctor` reports its exact path as `configPath`) as
    `"models": {"review": "<provider>/<model>", ...}`, then run
    `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it working
@@ -362,10 +367,16 @@ The JSON block carries `summary`, `confidence`, `findings`, `contradictions`, `u
 contract: you verify by matching the quote against the source, not by re-reading the page. Do that
 for two or three of the load-bearing findings and tell the user which ones you checked.
 
+Search the whole file, not the cited line. Measured, a `path:line` citation lands within a line or
+two of the quote rather than exactly on it, so grepping only the cited line can make a real,
+verbatim quote look invented.
+
 Three things to check before relaying anything:
 
 - `tools_used` — if `web_search` is `blocked` or `unavailable`, the model answered from memory.
-  Say so, and treat the whole report as unsourced.
+  Say so, and treat the whole report as unsourced. An `ok` there confirms nothing: `agy
+  --output-format json` returns no tool-call trace, so `tools_used` is only the model's own word
+  for what it did. That is exactly why every finding has to carry a quote.
 - `unverified` — these are claims the model could not quote. They are not findings. Relay them as
   guesses or not at all.
 - `contradictions` — sources disagreeing is a real result. Do not silently pick one.
@@ -395,8 +406,9 @@ fails instead of answering from a fresh conversation. Cursor has no such check.
 
 ## Reading the result
 
-Output is one JSON envelope on stdout: `{ok, result, sessionId, runDir, provider, model, usage,
-treeChanged}`. A `research --scratch` run also carries `"scratch": true`. The full packet and raw
+Output is one JSON envelope on stdout: `{ok, result, verb, sessionId, runDir, packetPath, provider,
+model, usage, elapsedMs, treeChanged}`, plus `guardViolation` when `treeChanged` is true. A
+`research --scratch` run also carries `"scratch": true`. The full packet and raw
 response are kept in `runDir` (last 20 runs per repo).
 
 `result` is the model's prose, ending in a fenced JSON block (verdict + findings for review,

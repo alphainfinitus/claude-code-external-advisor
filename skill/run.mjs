@@ -133,7 +133,7 @@ const PROVIDERS = {
     readOnlyStrength: 'prompt',
     webAccess: 'full',
     webNote:
-      'search_web and read_url_content are both present and work in plan mode; a chrome-devtools MCP browser is listed too. Measured on agy 1.1.26 on 2026-09-04.',
+      'search_web and read_url_content are both present and work in plan mode; a chrome-devtools MCP browser is listed too. Search and fetch re-measured on agy 1.1.27 on 2026-09-05.',
     buildArgs({ model, addDir, timeoutSeconds, resume, prompt }) {
       // `-p` consumes the next token as the prompt, so the prompt must ride on `-p=` and come
       // first. Putting it last, after the other flags, exits 2 with "--mode" read as the prompt.

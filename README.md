@@ -130,8 +130,8 @@ Print mode alone is not read-only at all. Cursor's own help says `-p` "has acces
 including write and shell". Ask mode refuses mutating tool calls at dispatch.
 
 agy's plan mode is a slash-command expansion, so it is an instruction rather than a permission
-gate. It blocked writes and shell in every test. It does not survive a resume, so the runner sends
-it on every call. agy's own `--sandbox` restricts nothing relevant, so it is not used.
+gate, and it has been seen not to hold. It does not survive a resume, so the runner sends it on
+every call. agy's own `--sandbox` restricts nothing relevant, so it is not used.
 
 Two further layers back them up: `sandbox` in config (Cursor only), and a content fingerprint of
 the working tree taken before and after each run, which fails the run if anything moved.
@@ -141,8 +141,11 @@ Shell, edits and MCP servers are blocked on Cursor.
 
 On agy, plan mode removes nothing from the tool list. Measured on agy 1.1.26: the session still
 lists file write, shell, subagents, web search, browser control and MCP tools. Plan mode is only an
-instruction to the model. In tests it obeyed. The fingerprint guard is what catches a write. Whether
-an agy subagent inherits the plan-mode instruction was not measured.
+instruction to the model, and the model does not always follow it. On 2026-09-05, on agy 1.1.27, a
+read-only review run wrote a 6795-byte `AGENTS.md` into the repository root that nobody had asked
+for. That is one observed instance, not a rate. The fingerprint guard caught it and failed the run.
+It is the only thing that does. Whether an agy subagent inherits the plan-mode instruction was not
+measured.
 
 Web fetching is not blocked outright: the tool is dispatched and rejected per URL. Measured on
 Cursor, `cursor.com` succeeds while `example.com`, `github.com`, `docs.anthropic.com` and
@@ -165,7 +168,9 @@ through it, and keeps a copy on disk. `agy` also keeps a full copy of every conv
 `~/.gemini/antigravity-cli/`, outside this skill's control. Tell people that before they use it.
 `review`, `consult` and `research` forward no transcript, only the packet you or the skill
 composed, so those are the modes to use when session contents matter. `research --scratch` is the
-most private of the four: no transcript, and not even the repository.
+most private of the four: no transcript, and not even the repository. Not nothing, though. The
+model is still handed the run directory, and that path contains this repository's name. On `agy`
+the workspace is only the process working directory, so nothing stops a read outside it.
 
 Packets and raw responses are written to the state directory's `runs/` and kept for the last
 `keepRuns` runs per repository. They contain full diffs.
