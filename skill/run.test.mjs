@@ -642,6 +642,54 @@ describe('research', () => {
     assert.match(ws, /external-advisor-scratch/, 'the agent must have run in a scratch workspace');
     assert.equal(existsSync(ws), false, 'a failed run must not leave its workspace behind');
   });
+
+  it('refuses to resume a scratch run, whose follow-up would land in the repository', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('resume-scratch'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ agy: agyStub({ argvLog: log }) });
+
+    const first = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+    assert.equal(first.sessionId, 'agy-conv-1', first.error);
+    const callsBefore = readFileSync(log, 'utf8').trim().split('\n').length;
+
+    const out = runCli(['resume', '--repo', repo, '--session', 'agy-conv-1', '--message', 'and then?'], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /cannot resume a scratch run/);
+    // resume passes no workspace, so `ws` falls back to the repository: without the guard the
+    // follow-up reads the very code --scratch existed to hide.
+    assert.equal(
+      readFileSync(log, 'utf8').trim().split('\n').length,
+      callsBefore,
+      'the refusal must land before the agent is spawned',
+    );
+  });
+
+  it('still resumes a research run that was not scratch', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('resume-research'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ agy: agyStub({ argvLog: log }) });
+
+    const first = runCli(['research', '--repo', repo, '--question', 'anything'], { home, bin });
+    assert.equal(first.sessionId, 'agy-conv-1', first.error);
+
+    const out = runCli(['resume', '--repo', repo, '--session', 'agy-conv-1', '--message', 'and then?'], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, true, out.error);
+    assert.match(readFileSync(log, 'utf8').trim().split('\n').pop(), /--conversation agy-conv-1/);
+  });
 });
 
 describe('agy resume', () => {

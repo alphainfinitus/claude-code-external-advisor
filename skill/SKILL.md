@@ -342,9 +342,11 @@ you are delegating legwork, not asking for judgement.
   first — that is the one that matters and the one you can still inspect. The throwaway directory
   is already deleted by then, so the envelope's "inspect `git status`" advice cannot be followed
   for it. Say which one you found moved.
-- **Do not `resume` a scratch run.** `resume` has no workspace flag, so a follow-up would run in
-  the repository — the thing `--scratch` existed to prevent. Start a fresh `research --scratch`
-  instead. A scratch run's envelope carries `"scratch": true`, and so does its `meta.json`.
+- **A scratch run cannot be resumed. The runner refuses it.** `resume` has no workspace flag, so a
+  follow-up would run in the repository — the thing `--scratch` existed to prevent — and the
+  throwaway directory is deleted by then anyway. Start a fresh `research --scratch` run instead.
+  A scratch run's envelope carries `"scratch": true`, and so does its `meta.json`, which is how
+  the refusal recognises one.
 
 **Web reach differs by provider.** `doctor` reports `webAccess` and `webNote` per provider. On a
 `restricted` provider, URL fetch is allow-listed and whether a search tool exists was never
@@ -384,6 +386,9 @@ than re-briefing from scratch.
 
 A session id is only valid on the CLI that issued it. The runner looks the provider up from the
 original run's saved metadata, so you pass only `--session` and `--message`.
+
+A `research --scratch` run is the one thing you cannot resume, and the runner refuses it rather
+than quietly running the follow-up in the repository.
 
 On `agy`, if the reply carries a different conversation id than the one you asked for, the run
 fails instead of answering from a fresh conversation. Cursor has no such check.
@@ -448,7 +453,7 @@ be edited further without its status line moving. Git-ignored files are out of s
 
 `node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
-both providers end to end, and the research verb's argument rules and scratch cleanup. 34 tests.
+both providers end to end, and the research verb's argument rules and scratch cleanup. 36 tests.
 The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so it needs no network and no account with
 either vendor. Run it after a Cursor CLI or Antigravity CLI upgrade, alongside re-checking what
 `--mode ask` and `--mode plan` actually block.

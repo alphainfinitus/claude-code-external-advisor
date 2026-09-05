@@ -297,7 +297,8 @@ function resolveModel(cfg, job, override) {
 
 /**
  * Finds the provider that issued a session id, by scanning run metadata. A session id is only
- * valid on the CLI that created it, so resume must not guess.
+ * valid on the CLI that created it, so resume must not guess. The run's `scratch` flag comes back
+ * with it, because a scratch run is the one kind resume cannot reproduce.
  */
 function findRunProvider(session) {
   if (!existsSync(RUNS)) return null;
@@ -312,7 +313,7 @@ function findRunProvider(session) {
       try {
         const m = JSON.parse(readFileSync(join(RUNS, bucket, run, 'meta.json'), 'utf8'));
         if (m.sessionId === session && Object.hasOwn(PROVIDERS, m.provider)) {
-          return { provider: m.provider, model: m.model };
+          return { provider: m.provider, model: m.model, scratch: Boolean(m.scratch) };
         }
       } catch {}
     }
@@ -1274,6 +1275,15 @@ async function main() {
     if (!origin) {
       fail(
         `no run found for session "${session}"; resume only works from the state directory that started it or the run was pruned (keepRuns)`,
+      );
+    }
+    // The throwaway workspace was deleted when the research run ended, and resume passes no
+    // workspace, so `ws` would fall back to the repository - the code --scratch existed to keep
+    // the model away from. `resume --scratch` is not the answer either: resume never reads that
+    // flag, so it would silently do the same thing.
+    if (origin.scratch) {
+      fail(
+        'cannot resume a scratch run; its workspace was deleted and a resume would run in the repository. Start a fresh research --scratch run instead.',
       );
     }
     // No model unless explicitly given: a resumed session keeps the model it started with, so
