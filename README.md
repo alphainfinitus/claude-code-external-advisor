@@ -4,8 +4,9 @@ A Claude Code skill that gets a second opinion from a different model, without l
 
 It shells out to the [Cursor CLI](https://cursor.com/docs/cli/overview) or the
 [Antigravity CLI](https://antigravity.google/docs/cli) in read-only mode, so GPT-5.x, Grok, Gemini
-or Composer can review a diff, critique the work Claude just did, answer a design question, or research something and come back with sources.
-Each mode picks its own provider and model. Usage bills against whichever account you use.
+or Composer can review a diff, critique the work Claude just did, answer a design question, or
+research something and come back with sources. Each mode picks its own provider and model. Usage
+bills against whichever account you use.
 
 ## Why
 
@@ -108,8 +109,9 @@ by hand.
 Two notes on choosing models. Avoid `claude-*` for review and consult on either provider, since a
 Claude checking Claude's work defeats the purpose; research is exempt, because it judges nothing
 Claude wrote. Avoid `claude-fable-*` entirely, which Cursor flags as NO ZDR, meaning prompts are
-retained. For research, check `webAccess` in `doctor` before picking: a provider whose web fetch is
-allow-listed can digest local files but cannot look things up.
+retained. For research, check `webAccess` in `doctor` before picking: on a `restricted` provider
+URL fetch is allow-listed and whether a web search tool exists was never measured, so web lookups
+there are unreliable. Digesting local files still works.
 
 ## How it works
 
@@ -161,8 +163,9 @@ that is deleted when the run ends. What otherwise differs between modes is the t
 Cursor's model providers on `cursor`, Google on `agy` - including any tool output that passed
 through it, and keeps a copy on disk. `agy` also keeps a full copy of every conversation under
 `~/.gemini/antigravity-cli/`, outside this skill's control. Tell people that before they use it.
-`review` and `consult` forward no transcript, only the packet you or the skill composed, so those
-are the modes to use when session contents matter.
+`review`, `consult` and `research` forward no transcript, only the packet you or the skill
+composed, so those are the modes to use when session contents matter. `research --scratch` is the
+most private of the four: no transcript, and not even the repository.
 
 Packets and raw responses are written to the state directory's `runs/` and kept for the last
 `keepRuns` runs per repository. They contain full diffs.

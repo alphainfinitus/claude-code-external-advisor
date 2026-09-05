@@ -45,8 +45,7 @@ node $SKILL/run.mjs doctor
 It returns JSON with `stateRoot`, `configPath`, `configExists`, `config`, `configErrors`, and a
 `providers` map. Every provider entry has `bin`, `authenticated`, `readOnly`, `readOnlyStrength`,
 `webAccess`, `webNote`, `modelCount`, `models`, `modelLabels` and `warnings`. Drive the rest
-interactively rather than
-making the user edit JSON:
+interactively rather than making the user edit JSON:
 
 1. **Read `configErrors` first.** A non-empty list means the config on disk is stale or wrong.
    Each string says what to fix. Rewrite the config from the picks below rather than patching it.
@@ -80,8 +79,8 @@ making the user edit JSON:
    - Offer "same as advise" as a `consult` option; they are usually the same job. Mark the
      current value so a no-op answer is easy.
    - For `research`, show the provider's `webAccess` and `webNote` from `doctor` in the option
-     text. A `restricted` provider can still digest a codebase but cannot look things up, and
-     nobody can guess that from a model id.
+     text. `restricted` means URL fetch is allow-listed, so treat web lookups there as unreliable;
+     the provider can still digest a codebase. Nobody can guess that from a model id.
    - The lineage rule does not apply to `research`: it is not a judgement of Claude's work, so
      `claude-*` models are a legitimate pick there. `claude-fable-*` stays excluded on every job,
      because that exclusion is about prompt retention, not lineage.
@@ -94,10 +93,11 @@ making the user edit JSON:
    Cursor's model providers. On `agy` that is Google, and agy also keeps a full copy of every
    conversation under `~/.gemini/antigravity-cli/`, outside this skill's control. A copy is kept
    under the skill's own `runs/` directory too. It triggers on phrases as ordinary as "am I
-   missing something". Say it plainly once. `review` and `consult` forward no transcript, only the
-   packet, so those are the modes for when session contents matter - but note every mode gives the
-   model the repository as its workspace by default, so it reads repository files in all of them.
-   `research --scratch` is the one exception: it hands over an empty throwaway directory instead.
+   missing something". Say it plainly once. `review`, `consult` and `research` forward no
+   transcript, only the packet, so those are the modes for when session contents matter - but note
+   every mode gives the model the repository as its workspace by default, so it reads repository
+   files in all of them. `research --scratch` is the one exception, and so the most private of the
+   four: it hands over an empty throwaway directory instead of the repository.
 7. Write their picks into the config (`doctor` reports its exact path as `configPath`) as
    `"models": {"review": "<provider>/<model>", ...}`, then run
    `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it working
@@ -105,9 +105,10 @@ making the user edit JSON:
 
 Never guess at model IDs — they rot fast, and `doctor` is the live list per provider. Steer away
 from `claude-*` for `review` and `consult` on **either** provider: a Claude reviewing Claude's work
-defeats the purpose. That rule stops at `research`, which judges nothing Claude wrote. agy's catalogue includes `claude-sonnet-4-6` and `claude-opus-4-6-thinking`,
-so the rule applies there too. Never offer `claude-fable-*`, which Cursor flags **NO ZDR**, meaning
-prompts are retained. That NO ZDR note is Cursor-specific.
+defeats the purpose. agy's catalogue includes `claude-sonnet-4-6` and `claude-opus-4-6-thinking`,
+so that rule applies there too. It stops at `research`, which judges nothing Claude wrote. Never
+offer `claude-fable-*`, which Cursor flags **NO ZDR**, meaning prompts are retained. That NO ZDR
+note is Cursor-specific.
 
 ## Where the runner lives
 
@@ -143,11 +144,11 @@ available - set it on **every** external-advisor invocation, in exactly this sha
 <Verb> via External Advisor using <model label>
 ```
 
-- `advise`  → `Advising via External Advisor using GPT-5.6 Sol 1M High`
-- `review`  → `Reviewing via External Advisor using Codex 5.3 High`
-- `consult` → `Consulting via External Advisor using GPT-5.6 Sol 1M High`
+- `advise`   → `Advising via External Advisor using GPT-5.6 Sol 1M High`
+- `review`   → `Reviewing via External Advisor using Codex 5.3 High`
+- `consult`  → `Consulting via External Advisor using GPT-5.6 Sol 1M High`
 - `research` → `Researching via External Advisor using Gemini 3.8 Flash High`
-- `resume`  → `Following up via External Advisor using GPT-5.6 Sol 1M High`
+- `resume`   → `Following up via External Advisor using GPT-5.6 Sol 1M High`
 
 Model labels live in `modelLabels` in the config, keyed by **provider first, then model id**. Read
 `modelLabels[provider][model]` rather than inventing a name, and fall back to `provider/model` if
@@ -336,16 +337,19 @@ you are delegating legwork, not asking for judgement.
   the question is not about this code: the model then has no local files to read, and nothing of
   yours goes into the workspace. The directory is removed on every exit path.
 - Without `--scratch` the repository is the workspace, so file-based questions work with no setup.
-- If a scratch run reports `treeChanged`, the model wrote into the throwaway directory, which
-  cleanup has already deleted — so the envelope's "inspect `git status`" advice does not apply to it.
-  Your repository is fingerprinted separately and is still the thing to check. Say which one moved.
-- **Do not `resume` a scratch run.** `resume` has no workspace flag, so a follow-up would run in the
-  repository — the thing `--scratch` existed to prevent. Start a fresh `research --scratch` instead.
-  Runs made with `--scratch` carry `"scratch": true` in their `meta.json`.
+- `treeChanged` on a scratch run means the repository moved **or** the throwaway directory did:
+  both are fingerprinted, and the flag is the OR of the two. Check `git status` in the repository
+  first — that is the one that matters and the one you can still inspect. The throwaway directory
+  is already deleted by then, so the envelope's "inspect `git status`" advice cannot be followed
+  for it. Say which one you found moved.
+- **Do not `resume` a scratch run.** `resume` has no workspace flag, so a follow-up would run in
+  the repository — the thing `--scratch` existed to prevent. Start a fresh `research --scratch`
+  instead. A scratch run's envelope carries `"scratch": true`, and so does its `meta.json`.
 
-**Web reach differs by provider.** `doctor` reports `webAccess` and `webNote` per provider. A
-`restricted` provider can still digest local files but cannot look things up on the web, and the
-report's `tools_used` block will say so.
+**Web reach differs by provider.** `doctor` reports `webAccess` and `webNote` per provider. On a
+`restricted` provider, URL fetch is allow-listed and whether a search tool exists was never
+measured, so treat web lookups there as unreliable; digesting local files still works. Read
+`webNote` for what was actually measured, and check the report's `tools_used` block afterwards.
 
 ### Reading a research result
 
@@ -387,7 +391,8 @@ fails instead of answering from a fresh conversation. Cursor has no such check.
 ## Reading the result
 
 Output is one JSON envelope on stdout: `{ok, result, sessionId, runDir, provider, model, usage,
-treeChanged}`. The full packet and raw response are kept in `runDir` (last 20 runs per repo).
+treeChanged}`. A `research --scratch` run also carries `"scratch": true`. The full packet and raw
+response are kept in `runDir` (last 20 runs per repo).
 
 `result` is the model's prose, ending in a fenced JSON block (verdict + findings for review,
 recommendation + risk for consult, sourced findings + `tools_used` for research). Render the prose
@@ -443,9 +448,10 @@ be edited further without its status line moving. Git-ignored files are out of s
 
 `node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
-both providers end to end, and the research verb's argument rules and scratch cleanup. 34 tests. The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so
-it needs no network and no account with either vendor. Run it after a Cursor CLI or Antigravity CLI
-upgrade, alongside re-checking what `--mode ask` and `--mode plan` actually block.
+both providers end to end, and the research verb's argument rules and scratch cleanup. 34 tests.
+The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so it needs no network and no account with
+either vendor. Run it after a Cursor CLI or Antigravity CLI upgrade, alongside re-checking what
+`--mode ask` and `--mode plan` actually block.
 
 ## Config
 

@@ -70,11 +70,11 @@ model id.
 format. Each entry carries `bin`, `installHint`, `loginHint`, `readOnly` (the flag that makes the
 run read-only), `readOnlyStrength` (`"dispatch"` when the CLI refuses the tool call, `"prompt"`
 when the model is merely told), `buildArgs`, `listModels` (which doubles as the auth probe), and
-`parse`, plus `webAccess` (`full` / `restricted` / `unknown`) and `webNote`, the measured web reach
-`research` and setup read. Two are optional: `verifySession(requested, returned)` and `warnings(run)`. `parse`
-returns the normalized `{ok, text, sessionId, usage, error}` or `null`, and `invoke()` reads
-nothing else, so adding a CLI (codex, gemini) touches no run, guard or persistence logic.
-`buildArgs` must produce a read-only invocation.
+`parse`, plus `webAccess` (`full` or `restricted`) and `webNote`, the measured web reach that
+`research` and setup read. Two are optional: `verifySession(requested, returned)` and
+`warnings(run)`. `parse` returns the normalized `{ok, text, sessionId, usage, error}` or `null`,
+and `invoke()` reads nothing else, so adding a CLI (codex, gemini) touches no run, guard or
+persistence logic. `buildArgs` must produce a read-only invocation.
 
 **`advise` locates the transcript itself** via `CLAUDE_CODE_SESSION_ID` and
 `~/.claude/projects/<repo-path-slug>/<sid>.jsonl`, then distils it (`distillTranscript`). It cannot
