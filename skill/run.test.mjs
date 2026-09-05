@@ -525,6 +525,76 @@ describe('agy provider', () => {
   });
 });
 
+describe('research', () => {
+  it('runs a question through the configured provider and records the verb', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+
+    const out = runCli(['research', '--repo', repo, '--question', 'what is the current agy release'], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.verb, 'research');
+    assert.equal(out.provider, 'agy');
+    const packet = readFileSync(out.packetPath, 'utf8');
+    assert.match(packet, /what is the current agy release/, 'the question must reach the packet');
+    assert.match(packet, /Every substantive claim you make must carry its source/, 'the research prompt must be prepended');
+  });
+
+  it('reads a long brief from --packet', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-packet'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'brief.md'), 'compare these four rate limiters\n');
+    const bin = stubBin({ agy: agyStub() });
+
+    const out = runCli(['research', '--repo', repo, '--packet', join(repo, 'brief.md')], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.match(readFileSync(out.packetPath, 'utf8'), /compare these four rate limiters/);
+  });
+
+  it('requires exactly one of --question and --packet', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-args'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'brief.md'), 'brief\n');
+    const bin = stubBin({ agy: agyStub() });
+
+    const neither = runCli(['research', '--repo', repo], { home, bin });
+    assert.equal(neither.ok, false);
+    assert.match(neither.error, /requires --question <text> or --packet <file>/);
+
+    const both = runCli(
+      ['research', '--repo', repo, '--question', 'q', '--packet', join(repo, 'brief.md')],
+      { home, bin },
+    );
+    assert.equal(both.ok, false);
+    assert.match(both.error, /not both/);
+    assert.equal(existsSync(join(home, 'runs')), false, 'must reject before writing a packet');
+  });
+
+  it('names the job when no research model is configured', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('research-nomodel'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub(), 'cursor-agent': cursorStub() });
+
+    const out = runCli(['research', '--repo', repo, '--question', 'q'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.error, 'no model configured for research; run setup');
+  });
+});
+
 describe('agy resume', () => {
   it('resumes with --conversation and re-sends plan mode', () => {
     const home = tmp('home');

@@ -9,6 +9,7 @@
  * Usage:
  *   node run.mjs review  [--repo P] [--pr N] [--base REF] [--task STR] [--model M] [--timeout S]
  *   node run.mjs consult  --packet FILE [--repo P] [--model M] [--timeout S]
+ *   node run.mjs research --question STR | --packet FILE [--repo P] [--model M] [--timeout S]
  *   node run.mjs advise   [--question STR] [--context FILE] [--repo P] [--model M] [--timeout S]
  *   node run.mjs resume   --session ID --message STR [--repo P] [--model M]
  *   node run.mjs sync-labels
@@ -1154,6 +1155,41 @@ async function main() {
     });
   }
 
+  if (verb === 'research') {
+    const question = args.question && args.question !== true ? String(args.question) : null;
+    const packetFile = args.packet && args.packet !== true ? String(args.packet) : null;
+    // Exactly one source. Accepting both would silently drop one, and the caller would have no way
+    // to tell which question the model actually answered.
+    if (question && packetFile) fail('research takes --question or --packet, not both');
+    if (!question && !packetFile) fail('research requires --question <text> or --packet <file>');
+    if (packetFile && !existsSync(packetFile)) fail(`packet file not found: ${packetFile}`);
+    const brief = packetFile ? readFileSync(packetFile, 'utf8') : question;
+    const body = [
+      readPrompt('research'),
+      '',
+      '---',
+      '',
+      '## The question',
+      '',
+      brief,
+      '',
+      '## Workspace',
+      '',
+      `The repository at ${repo}. Read it when the question is about this code.`,
+      '',
+    ].join('\n');
+    const picked = resolveModel(cfg, 'research', args.model);
+    return invoke({
+      cfg,
+      verb: 'research',
+      repo,
+      provider: picked.provider,
+      model: picked.model,
+      packetBody: body,
+      timeoutSeconds,
+    });
+  }
+
   if (verb === 'resume') {
     const session = args.session;
     const message = args.message;
@@ -1194,7 +1230,7 @@ async function main() {
     });
   }
 
-  fail(`unknown verb "${verb || ''}". Expected: advise | review | consult | resume | doctor | models | sync-labels`);
+  fail(`unknown verb "${verb || ''}". Expected: advise | review | consult | research | resume | doctor | models | sync-labels`);
 }
 
 main().catch((e) => {
