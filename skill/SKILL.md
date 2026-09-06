@@ -420,6 +420,12 @@ binary, missing packet file, bad config) carry only `error`, plus hints such as 
 plain-text and self-explanatory (invalid API key, unknown model, timeout), and paraphrasing
 them loses the fix. Don't retry a failed run unchanged.
 
+When a CLI exits non-zero but said why, `error` is that reason rather than `<bin> exited <n>`, and
+`raw` quotes the stream the reason was on. So a model id the account cannot use reports
+`The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.` Relay it as
+given: it names the fix. A bare `<bin> exited <n>` means the CLI died without explaining itself,
+and then `raw` is all there is.
+
 Every run pre-flights its provider before it writes a packet or spawns anything. Three failures
 come from there, and all are fixed by the user, not by retrying:
 
@@ -462,7 +468,7 @@ be edited further without its status line moving. Git-ignored files are out of s
 `node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
 all three providers end to end, and the research verb's argument rules and scratch cleanup.
-65 tests. The suite stubs `gh`, `cursor-agent`, `agy` and `codex` on PATH, so it needs
+69 tests. The suite stubs `gh`, `cursor-agent`, `agy` and `codex` on PATH, so it needs
 no network and no account with any vendor. Run it after a Cursor, Antigravity or Codex CLI upgrade,
 alongside re-checking what `--mode ask`, `--mode plan` and `-s read-only` actually block.
 

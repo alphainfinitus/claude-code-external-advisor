@@ -152,6 +152,8 @@ function codexStub({
   messages = ['stub review'],
   messageKey = 'text',
   errorMessage = '',
+  turnFailed = '',
+  failShape = 'both',
 } = {}) {
   // One listed model with two efforts, one listed model with no efforts at all, and one hidden
   // model: the three shapes listModels has to treat differently.
@@ -177,13 +179,34 @@ function codexStub({
     '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,' +
       '"reasoning_output_tokens":0}}',
   ];
+  // A turn codex could not run: the reason arrives on stdout as a top-level event and a
+  // turn.failed, the exit code is 1, and stderr carries only the benign stdin line. That last
+  // detail is the whole point - a reader who prefers stderr sees the noise and not the reason.
+  // `failShape` picks which of the two codex sends. Real codex sends both, so a test using
+  // 'both' cannot tell which branch of the parser did the work - hence the single-event shapes.
+  const failure = [
+    `{"type":"thread.started","thread_id":"${threadId}"}`,
+    '{"type":"turn.started"}',
+    // The warning that precedes the real failure when a model id is the cause. It must lose to it.
+    ...(errorMessage
+      ? [`{"type":"item.completed","item":{"id":"item_0","type":"error","message":"${errorMessage}"}}`]
+      : []),
+    ...(failShape === 'turn' ? [] : [`{"type":"error","message":"${turnFailed}"}`]),
+    ...(failShape === 'error' ? [] : [`{"type":"turn.failed","error":{"message":"${turnFailed}"}}`]),
+  ];
   return [
     argvLog ? `printf '[%s]' "$@" >> "${argvLog}"; echo >> "${argvLog}"` : '',
     `case "$1 $2" in`,
     `  'login status') ${login}`,
     `  'debug models') echo '${catalogue}'; exit 0 ;;`,
     `esac`,
-    ...events.map((e) => `echo '${e}'`),
+    ...(turnFailed
+      ? [
+          ...failure.map((e) => `echo '${e}'`),
+          `echo 'Reading additional input from stdin...' >&2`,
+          'exit 1',
+        ]
+      : events.map((e) => `echo '${e}'`)),
   ]
     .filter(Boolean)
     .join('\n');
@@ -1370,6 +1393,85 @@ describe('codex resume', () => {
     // one, and every other test would still pass.
     assert.match(last, /\[-m\]\[gpt-5\.6-luna\]/);
     assert.match(last, /\[-c\]\[model_reasoning_effort="max"\]/);
+  });
+
+  it("reports codex's own reason for a dead turn, not just its exit code", () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'codex/gpt-5.6-terra:high' } });
+    const repo = initRepo(tmp('codexdead'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    // What a model id the account cannot use actually produced, measured on 0.153.4.
+    const api =
+      '{\\"type\\":\\"error\\",\\"status\\":400,\\"error\\":{\\"type\\":\\"invalid_request_error\\",' +
+      '\\"message\\":\\"The gpt-6-astra model is not supported when using Codex with a ChatGPT account.\\"}}';
+    const bin = stubBin({ codex: codexStub({ turnFailed: api }) });
+
+    const out = runCli(['review', '--repo', repo], { home, bin });
+
+    assert.equal(out.ok, false);
+    // The reason is on stdout and stderr holds only the benign stdin line, so "stderr or nothing"
+    // reported `codex exited 1` and threw the 400 away - unactionable for whoever has to fix it.
+    assert.match(out.error, /not supported when using Codex with a ChatGPT account/);
+    assert.equal(out.error.includes('exited 1'), false, out.error);
+    assert.equal(out.raw.includes('Reading additional input from stdin'), false, out.raw);
+  });
+
+  it('reads a turn.failed that arrives without a top-level error event', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'codex/gpt-5.6-terra:high' } });
+    const repo = initRepo(tmp('codexturnonly'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const bin = stubBin({ codex: codexStub({ turnFailed: 'the turn died', failShape: 'turn' }) });
+
+    const out = runCli(['review', '--repo', repo], { home, bin });
+
+    // Real codex sends the top-level `error` event and `turn.failed` together, so a parser that
+    // read only the first would look correct forever. Either alone has to carry the reason.
+    assert.equal(out.ok, false);
+    assert.match(out.error, /the turn died/);
+  });
+
+  it('prefers the reason the turn died to the warning that preceded it', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'codex/gpt-5.6-terra:high' } });
+    const repo = initRepo(tmp('codexboth'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    // The real pair: codex warns that it is falling back, then the API refuses the model outright.
+    const bin = stubBin({
+      codex: codexStub({
+        errorMessage: 'Model metadata for gpt-6-astra not found. Defaulting to fallback metadata',
+        turnFailed:
+          '{\\"error\\":{\\"message\\":\\"The gpt-6-astra model is not supported when using Codex with a ChatGPT account.\\"}}',
+      }),
+    });
+
+    const out = runCli(['review', '--repo', repo], { home, bin });
+
+    // Reporting the fallback warning tells the reader codex degraded itself; reporting the 400
+    // tells them the model id is wrong. Only the second is something they can act on.
+    assert.equal(out.error, 'The gpt-6-astra model is not supported when using Codex with a ChatGPT account.', out.error);
+  });
+
+  it('unwraps the API JSON codex nests inside a turn.failed message', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { review: 'codex/gpt-5.6-terra:high' } });
+    const repo = initRepo(tmp('codexnested'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'added.js'), 'export const x = 1\n');
+    const api =
+      '{\\"type\\":\\"error\\",\\"status\\":429,\\"error\\":{\\"type\\":\\"rate_limit\\",' +
+      '\\"message\\":\\"You have hit your usage limit.\\"}}';
+    const bin = stubBin({ codex: codexStub({ turnFailed: api }) });
+
+    const out = runCli(['review', '--repo', repo], { home, bin });
+
+    // codex hands over the API's whole JSON response as a string. Passed through it is a wall of
+    // escaped braces; the sentence a human can act on is two levels in.
+    assert.equal(out.error, 'You have hit your usage limit.', out.error);
+    assert.equal(out.error.includes('rate_limit'), false);
   });
 
   it('fails when codex answers from a different thread', () => {

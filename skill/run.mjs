@@ -85,6 +85,26 @@ function splitCodexEffort(model) {
 }
 
 /**
+ * The human sentence inside a codex error. `turn.failed` and the top-level `error` event carry the
+ * API's own JSON response as a STRING, so the readable part - "The 'gpt-6-astra' model is not
+ * supported when using Codex with a ChatGPT account." - sits two levels in. Reported raw it is a
+ * wall of escaped JSON nobody reads. Anything that does not unwrap is passed through unchanged.
+ */
+function codexErrorText(message) {
+  const raw = String(message == null ? '' : message).trim();
+  if (!raw) return 'codex reported an error with no message';
+  try {
+    const o = JSON.parse(raw);
+    const inner = o && o.error && o.error.message;
+    if (typeof inner === 'string' && inner.trim()) return inner.trim();
+    if (typeof o === 'string' && o.trim()) return o.trim();
+  } catch {
+    // Not JSON. That is the common case and the string is already the message.
+  }
+  return raw;
+}
+
+/**
  * Provider adapters. This table is the only place that knows a CLI's flags or output format.
  * `buildArgs` must produce a read-only invocation, and it returns the FULL argv including the
  * prompt, because the CLIs disagree about where the prompt goes. `readOnlyStrength` says how
@@ -363,6 +383,7 @@ const PROVIDERS = {
       let sessionId = null;
       let usage = null;
       let error = null;
+      let fatal = null;
       const texts = [];
       for (const line of stdout.split('\n')) {
         let o;
@@ -375,6 +396,11 @@ const PROVIDERS = {
         sawObject = true;
         if (o.type === 'thread.started' && o.thread_id) sessionId = o.thread_id;
         else if (o.type === 'turn.completed' && o.usage) usage = o.usage;
+        // The terminal failure. `turn.failed` and the top-level `error` event carry the reason the
+        // turn died - a rejected model id, a quota - while the item-level error above is only the
+        // warning that preceded it. The terminal one wins, so it overwrites rather than defers.
+        else if (o.type === 'turn.failed' && o.error) fatal = codexErrorText(o.error.message);
+        else if (o.type === 'error' && o.message) fatal = fatal || codexErrorText(o.message);
         else if (o.type === 'item.completed' && o.item) {
           // Every agent_message, not the last one: codex emits a short commentary preamble and
           // the real answer as two separate items, and keeping only the last drops the half the
@@ -392,9 +418,10 @@ const PROVIDERS = {
         }
       }
       if (!sawObject) return null;
-      // No turn.failed event was ever observed, so a failure shape we have not seen would read as
-      // a successful empty answer. Absence of an answer is the failure.
-      if (!error && !texts.length) error = 'codex produced no agent_message with text; the turn did not answer';
+      // A failure shape we have not seen would otherwise read as a successful empty answer, so
+      // absence of an answer is itself the failure.
+      if (fatal) error = fatal;
+      else if (!error && !texts.length) error = 'codex produced no agent_message with text; the turn did not answer';
       return { ok: !error, text: texts.join('\n\n'), sessionId, usage, error };
     },
     // An unknown resume id exits 1 today rather than starting a fresh thread, and the returned
@@ -712,10 +739,22 @@ function buildEnvelope(provider, res, timeoutSeconds, resume) {
     return { ok: false, error: `timed out after ${timeoutSeconds}s`, raw: (res.stdout || res.stderr).slice(0, 4000) };
   }
   if (res.code !== 0) {
+    // A bare "exited 1" is unactionable when the CLI said why. codex writes its reason to stdout
+    // as a JSON event and always writes a benign "Reading additional input from stdin..." line to
+    // stderr, so preferring stderr reported the noise and dropped a plain-English 400. Ask the
+    // provider to read its own output first; fall back to the exit code when it cannot.
+    let reason = null;
+    try {
+      const parsed = provider.parse(res.stdout);
+      if (parsed && parsed.error) reason = String(parsed.error);
+    } catch {
+      // A parser that throws on a dying CLI's half-written output must not mask the exit code.
+    }
     return {
       ok: false,
-      error: `${provider.bin} exited ${res.code}`,
-      raw: (res.stderr || res.stdout).trim().slice(0, 4000),
+      error: reason || `${provider.bin} exited ${res.code}`,
+      // Quote whichever stream carried the reason, not whichever one is non-empty.
+      raw: (reason ? res.stdout || res.stderr : res.stderr || res.stdout).trim().slice(0, 4000),
     };
   }
   const parsed = provider.parse(res.stdout);
