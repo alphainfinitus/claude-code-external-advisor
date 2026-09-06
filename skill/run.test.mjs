@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -136,12 +136,13 @@ function agyStub({ argvLog = '', conversationId = 'agy-conv-1', signedOut = fals
 const CURSOR_MODELS = { models: { review: 'cursor/m1', advise: 'cursor/m1', consult: 'cursor/m1' } };
 
 /**
- * Runs the CLI against an isolated state directory and returns its JSON envelope.
- * `omitBin` strips every PATH entry that holds that binary, so a test can prove the
- * not-installed branch even on a machine where the real CLI is installed.
+ * The child's environment, isolated from this process. `omitBin` strips every PATH entry that
+ * holds that binary, so a test can prove the not-installed branch even on a machine where the real
+ * CLI is installed. `env` adds variables for the child alone - the object below is a fresh copy,
+ * so a value hostile to git cannot reach the `git()` and `commit()` helpers, which run here.
  */
-function runCli(args, { home, bin, omitBin } = {}) {
-  const env = { ...process.env, EXTERNAL_ADVISOR_HOME: home };
+function childEnv({ home, bin, omitBin, env: extraEnv } = {}) {
+  const env = { ...process.env, EXTERNAL_ADVISOR_HOME: home, ...extraEnv };
   let path = process.env.PATH || '';
   if (omitBin) {
     path = path
@@ -150,12 +151,17 @@ function runCli(args, { home, bin, omitBin } = {}) {
       .join(':');
   }
   env.PATH = bin ? `${bin}:${path}` : path;
+  return env;
+}
+
+/** Runs the CLI against an isolated state directory and returns its JSON envelope. */
+function runCli(args, opts = {}) {
   try {
     return JSON.parse(
       execFileSync(process.execPath, [RUNNER, ...args], {
         cwd: SKILL_DIR,
         encoding: 'utf8',
-        env,
+        env: childEnv(opts),
         stdio: ['ignore', 'pipe', 'pipe'],
       }),
     );
@@ -164,6 +170,61 @@ function runCli(args, { home, bin, omitBin } = {}) {
     return JSON.parse(e.stdout || '{}');
   }
 }
+
+/** Runs the CLI for its exit status alone: a run killed by a signal prints no envelope to parse. */
+function runStatus(args, opts = {}) {
+  try {
+    execFileSync(process.execPath, [RUNNER, ...args], {
+      cwd: SKILL_DIR,
+      encoding: 'utf8',
+      env: childEnv(opts),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return 0;
+  } catch (e) {
+    return e.status === null ? `killed by ${e.signal}` : e.status;
+  }
+}
+
+describe('flag forms', () => {
+  it('reads --key=value, keeping a value that contains its own separators', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('equals-form'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub(), 'cursor-agent': cursorStub() });
+
+    // parseArgs only split on a space, so the whole of `model=agy/...` became the key and the flag
+    // was silently dropped. Splitting on the first `=` alone keeps the slash in the value.
+    const out = runCli(['research', '--repo', repo, '--model=agy/gemini-3.1-pro-high', '--question', 'anything'], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.provider, 'agy', 'the equals form must reach the same flag as the space form');
+    assert.equal(out.model, 'gemini-3.1-pro-high', 'the value must survive the slash inside it');
+  });
+
+  it('refuses a value on --scratch instead of guessing what it meant', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('scratch-with-value'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    // `--scratch=true` used to parse as a key named `scratch=true`, leaving args.scratch undefined:
+    // the run handed the repository to the model with no warning and no `scratch` in the envelope.
+    // Reading it as "on" now would be a guess, and reading `--scratch=false` as "off" would be the
+    // same failure again, so a value is an error either way.
+    const out = runCli(['research', '--repo', repo, '--scratch=true', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /--scratch takes no value/);
+    assert.equal(existsSync(log), false, 'the refusal must land before the model is given a workspace');
+  });
+});
 
 describe('write guard', () => {
   it('refuses to run outside a git repository', () => {
@@ -450,6 +511,19 @@ describe('doctor and labels', () => {
     const onDisk = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'));
     assert.equal(onDisk.modelLabels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
   });
+
+  it('reports each provider web reach so a research model can be picked knowingly', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub() });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    assert.equal(out.providers.agy.webAccess, 'full');
+    assert.equal(out.providers.cursor.webAccess, 'restricted');
+    assert.match(out.providers.cursor.webNote, /allow-list/);
+    assert.ok(out.providers.agy.webNote.length > 0, 'a bare rating with no measurement is not usable');
+  });
 });
 
 describe('cursor argv', () => {
@@ -509,6 +583,364 @@ describe('agy provider', () => {
     const meta = JSON.parse(readFileSync(join(out.runDir, 'meta.json'), 'utf8'));
     assert.equal(meta.provider, 'agy');
     assert.equal(meta.model, 'other');
+  });
+});
+
+describe('research', () => {
+  it('runs a question through the configured provider and records the verb', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+
+    const out = runCli(['research', '--repo', repo, '--question', 'what is the current agy release'], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.verb, 'research');
+    assert.equal(out.provider, 'agy');
+    const packet = readFileSync(out.packetPath, 'utf8');
+    assert.match(packet, /what is the current agy release/, 'the question must reach the packet');
+    assert.match(packet, /Every substantive claim you make must carry its source/, 'the research prompt must be prepended');
+  });
+
+  it('reads a long brief from --packet', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-packet'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'brief.md'), 'compare these four rate limiters\n');
+    const bin = stubBin({ agy: agyStub() });
+
+    const out = runCli(['research', '--repo', repo, '--packet', join(repo, 'brief.md')], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.match(readFileSync(out.packetPath, 'utf8'), /compare these four rate limiters/);
+  });
+
+  it('requires exactly one of --question and --packet', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-args'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'brief.md'), 'brief\n');
+    const bin = stubBin({ agy: agyStub() });
+
+    const neither = runCli(['research', '--repo', repo], { home, bin });
+    assert.equal(neither.ok, false);
+    assert.match(neither.error, /requires --question <text> or --packet <file>/);
+
+    const both = runCli(
+      ['research', '--repo', repo, '--question', 'q', '--packet', join(repo, 'brief.md')],
+      { home, bin },
+    );
+    assert.equal(both.ok, false);
+    assert.match(both.error, /not both/);
+    assert.equal(existsSync(join(home, 'runs')), false, 'must reject before writing a packet');
+  });
+
+  it('names the job when no research model is configured', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('research-nomodel'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub(), 'cursor-agent': cursorStub() });
+
+    const out = runCli(['research', '--repo', repo, '--question', 'q'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.error, 'no model configured for research; run setup');
+  });
+
+  it('runs a scratch question in a throwaway workspace and leaves the repository alone', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('research-scratch'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.treeChanged, false);
+    assert.equal(out.scratch, true, 'the envelope must mark the run as scratch');
+    const argv = readFileSync(log, 'utf8').trim().split('\n').pop();
+    const ws = argv.match(/--workspace (\S+)/)[1];
+    assert.notEqual(ws, repo, 'a scratch run must not hand over the repository');
+    assert.equal(existsSync(ws), false, 'the scratch workspace must be removed when the run ends');
+    assert.match(
+      readFileSync(out.packetPath, 'utf8'),
+      /There is no project here/,
+      'the packet must tell the model there is no project here',
+    );
+  });
+
+  it('removes the scratch workspace when the run fails', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-scratch-fail'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const cwdLog = join(tmp('cwd'), 'cwd.log');
+    // The auth probe passes, then the agent call records where it ran and dies. Counting leftover
+    // directories instead would pass before --scratch exists, because nothing would be created.
+    const bin = stubBin({
+      agy: [
+        `pwd >> "${cwdLog}"`,
+        `case "$1" in`,
+        `  models) printf 'gemini-3.1-pro-high\\tGemini 3.1 Pro (High)\\n'; exit 0 ;;`,
+        `esac`,
+        `echo 'agy exploded' >&2; exit 1`,
+      ].join('\n'),
+    });
+
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, false, 'the run must fail when the provider dies');
+    const ws = readFileSync(cwdLog, 'utf8').trim().split('\n').pop();
+    assert.match(ws, /external-advisor-scratch/, 'the agent must have run in a scratch workspace');
+    assert.equal(existsSync(ws), false, 'a failed run must not leave its workspace behind');
+  });
+
+  it('refuses to resume a scratch run, whose follow-up would land in the repository', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('resume-scratch'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ agy: agyStub({ argvLog: log }) });
+
+    const first = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+    assert.equal(first.sessionId, 'agy-conv-1', first.error);
+    const callsBefore = readFileSync(log, 'utf8').trim().split('\n').length;
+
+    const out = runCli(['resume', '--repo', repo, '--session', 'agy-conv-1', '--message', 'and then?'], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /cannot resume a scratch run/);
+    // resume passes no workspace, so `ws` falls back to the repository: without the guard the
+    // follow-up reads the very code --scratch existed to hide.
+    assert.equal(
+      readFileSync(log, 'utf8').trim().split('\n').length,
+      callsBefore,
+      'the refusal must land before the agent is spawned',
+    );
+  });
+
+  it('still resumes a research run that was not scratch', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('resume-research'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ agy: agyStub({ argvLog: log }) });
+
+    const first = runCli(['research', '--repo', repo, '--question', 'anything'], { home, bin });
+    assert.equal(first.sessionId, 'agy-conv-1', first.error);
+
+    const out = runCli(['resume', '--repo', repo, '--session', 'agy-conv-1', '--message', 'and then?'], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, true, out.error);
+    assert.match(readFileSync(log, 'utf8').trim().split('\n').pop(), /--conversation agy-conv-1/);
+  });
+
+  it('refuses a --packet that was typed with no file', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-bare-packet'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+
+    // A flag with no value parses as `true`. Read as "absent", this answered the question and
+    // silently dropped the --packet the user typed.
+    const out = runCli(['research', '--repo', repo, '--question', 'q', '--packet'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /--packet was given no file/);
+    assert.equal(existsSync(join(home, 'runs')), false, 'must reject before writing a packet');
+  });
+
+  it('fails when --packet names a file that is not there', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-missing-packet'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+
+    const out = runCli(['research', '--repo', repo, '--packet', join(repo, 'gone.md')], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /packet file not found/);
+    assert.equal(existsSync(join(home, 'runs')), false, 'must reject before writing a packet');
+  });
+
+  it('refuses --scratch on a verb that never reads it', () => {
+    const home = tmp('home');
+    writeConfig(home, CURSOR_MODELS);
+    const repo = initRepo(tmp('scratch-wrong-verb'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    writeFileSync(join(repo, 'q.md'), 'question');
+    const bin = stubBin({ 'cursor-agent': cursorStub() });
+
+    // parseArgs accepts any --flag, so this used to parse cleanly and run in the repository with
+    // no hint that the flag did nothing.
+    const out = runCli(['consult', '--repo', repo, '--scratch', '--packet', join(repo, 'q.md')], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /--scratch is not supported by "consult"/);
+    assert.match(out.error, /only research/, 'the refusal must name the verb that does support it');
+    assert.equal(existsSync(join(home, 'runs')), false, 'must reject before writing a packet');
+  });
+
+  it('reports a scratch workspace it could not build as a sentence, not a stack trace', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-scratch-broken'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+    // An unparseable global config fails `git init` inside the scratch directory. Left to throw,
+    // that reached main()'s catch and the user read a JS stack as the `error` string.
+    const gitconfig = join(tmp('gitconfig'), 'gitconfig');
+    writeFileSync(gitconfig, '[core\n');
+
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], {
+      home,
+      bin,
+      env: { GIT_CONFIG_GLOBAL: gitconfig },
+    });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /could not create the scratch workspace/);
+    assert.match(out.error, /bad config line/, "git's own reason must survive into the message");
+    assert.doesNotMatch(out.error, /run\.mjs:\d+/, 'a stack frame is not a user-facing error');
+  });
+
+  it('commits the scratch workspace through a repo-external hook that always fails', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'agy/gemini-3.1-pro-high' } });
+    const repo = initRepo(tmp('research-scratch-hooks'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub() });
+    // --no-verify skips pre-commit and commit-msg but not prepare-commit-msg, so a global
+    // core.hooksPath failed the scratch commit over someone else's checks. Only the `-c
+    // core.hooksPath=/dev/null` in prepareScratch defeats this hook.
+    const hooks = join(tmp('hooks'), 'hooks');
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, 'prepare-commit-msg'), '#!/bin/sh\necho "hostile hook ran" >&2\nexit 1\n');
+    chmodSync(join(hooks, 'prepare-commit-msg'), 0o755);
+    const gitconfig = join(tmp('gitconfig'), 'gitconfig');
+    writeFileSync(gitconfig, `[core]\n\thooksPath = ${hooks}\n`);
+
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], {
+      home,
+      bin,
+      env: { GIT_CONFIG_GLOBAL: gitconfig },
+    });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.scratch, true, 'the run must still have used a throwaway workspace');
+  });
+
+  it('refuses --scratch outside a repository before it builds anything', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const outside = tmp('nogit');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    // invoke() checks this too, but only after prepareScratch() has created a temp git repo and
+    // deleted it again, and it reports a working-tree guard the user never asked for.
+    const out = runCli(['research', '--repo', outside, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /even --scratch has to be run from inside one/);
+    assert.equal(existsSync(log), false, 'the refusal must land before any workspace is built');
+  });
+
+  it('puts the scratch parent directory under this user alone', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('scratch-parent'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    // On Linux tmpdir() is /tmp, shared by every user. One shared parent meant the first user to
+    // run owned it and everyone after them got EACCES from mkdir. macOS never showed it, because
+    // its tmpdir() is already per-user.
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    const ws = readFileSync(log, 'utf8').trim().split('\n').pop().match(/--workspace (\S+)/)[1];
+    assert.equal(
+      basename(dirname(ws)),
+      `external-advisor-scratch-${process.getuid()}`,
+      'the parent must be per-user and still name the skill that created it',
+    );
+  });
+
+  it('removes the scratch workspace when the terminal hangs up mid-run', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('scratch-sighup'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const cwdLog = join(tmp('cwd'), 'cwd.log');
+    // SIGHUP had no handler, and Node's default for it is to terminate without running 'exit', so
+    // a closed terminal tab or a dropped SSH session left the workspace in the temp dir forever.
+    // The stub signals its parent - the runner - and then outlives it.
+    const bin = stubBin({
+      'cursor-agent': [
+        `case "$1" in`,
+        `  --list-models) printf 'm1 - M1 (current)\\n'; exit 0 ;;`,
+        `esac`,
+        `pwd >> "${cwdLog}"`,
+        `kill -HUP $PPID`,
+        `sleep 10`,
+      ].join('\n'),
+    });
+
+    const status = runStatus(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    const ws = readFileSync(cwdLog, 'utf8').trim().split('\n').pop();
+    assert.equal(existsSync(ws), false, 'a hangup must not orphan the throwaway workspace');
+    assert.equal(status, 129, 'a signal exit must be 128 + the signal number');
+  });
+
+  it('names the throwaway workspace, not the repository, when only it was written to', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('scratch-guard-root'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    // The stub writes into its own working directory, which is the scratch workspace.
+    const bin = stubBin({
+      'cursor-agent': [
+        `case "$1" in`,
+        `  --list-models) printf 'm1 - M1 (current)\\n'; exit 0 ;;`,
+        `esac`,
+        `echo written > ./from-the-model.txt`,
+        AGENT_OK,
+      ].join('\n'),
+    });
+
+    // treeChanged is the OR of both fingerprints, so it said only that something moved. The
+    // repository was clean and the workspace already deleted, leaving nothing to check.
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.treeChanged, true);
+    assert.deepEqual(out.changedRoots.includes(repo), false, 'the repository was not the root that moved');
+    assert.match(out.guardViolation, /The throwaway workspace at .* changed/);
   });
 });
 

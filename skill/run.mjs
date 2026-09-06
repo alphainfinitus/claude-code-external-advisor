@@ -9,6 +9,7 @@
  * Usage:
  *   node run.mjs review  [--repo P] [--pr N] [--base REF] [--task STR] [--model M] [--timeout S]
  *   node run.mjs consult  --packet FILE [--repo P] [--model M] [--timeout S]
+ *   node run.mjs research --question STR | --packet FILE [--repo P] [--scratch] [--model M] [--timeout S]
  *   node run.mjs advise   [--question STR] [--context FILE] [--repo P] [--model M] [--timeout S]
  *   node run.mjs resume   --session ID --message STR [--repo P] [--model M]
  *   node run.mjs sync-labels
@@ -51,8 +52,14 @@ const DEFAULT_CONFIG = {
  * `buildArgs` must produce a read-only invocation, and it returns the FULL argv including the
  * prompt, because the CLIs disagree about where the prompt goes. `readOnlyStrength` says how
  * strong that guard is: "dispatch" means the CLI refuses the tool call, "prompt" means the model
- * is only told not to write. `parse` returns the normalized {ok, text, sessionId, usage, error},
- * so nothing downstream knows which CLI ran.
+ * is only told not to write. `webAccess` says how much of the web that CLI reached when it was
+ * last tried: "full" means both web search and URL fetch worked, "restricted" means at least one
+ * of them is limited or was never proven, and `webNote` carries the detail with the date. Both are
+ * measurements of what the CLI did, not vendor policy, so re-measure after a CLI upgrade. They are
+ * declared per CLI and never inferred, because `research` runs on whichever provider its job is
+ * configured with and setup has to say what that CLI can reach before someone picks it.
+ * `parse` returns the normalized {ok, text, sessionId, usage, error}, so nothing downstream knows
+ * which CLI ran.
  */
 const PROVIDERS = {
   cursor: {
@@ -61,6 +68,9 @@ const PROVIDERS = {
     loginHint: 'cursor-agent login  (opens a browser; the user must run this themselves)',
     readOnly: '--mode ask',
     readOnlyStrength: 'dispatch',
+    webAccess: 'restricted',
+    webNote:
+      'URL fetch is dispatched then rejected per URL: cursor.com succeeded while example.com, github.com, docs.anthropic.com and raw.githubusercontent.com were all rejected, which looks like a vendor allow-list. Whether a web search tool exists at all was never measured.',
     // `--mode ask` is verified to refuse writes; `-p` alone still carries write and shell tools.
     // `--trust` is required or headless runs block on the workspace-trust prompt.
     buildArgs({ model, workspace, addDir, sandbox, resume, prompt }) {
@@ -124,6 +134,9 @@ const PROVIDERS = {
     // Plan mode is a slash-command expansion, so it instructs the model rather than refusing a
     // tool call. It also does not survive a resume, which is why it is sent on every call.
     readOnlyStrength: 'prompt',
+    webAccess: 'full',
+    webNote:
+      'search_web and read_url_content are both present and work in plan mode, re-measured on agy 1.1.27 on 2026-09-05. A chrome-devtools MCP browser was listed alongside them on agy 1.1.26 on 2026-09-04 and has not been re-measured since.',
     buildArgs({ model, addDir, timeoutSeconds, resume, prompt }) {
       // `-p` consumes the next token as the prompt, so the prompt must ride on `-p=` and come
       // first. Putting it last, after the other flags, exits 2 with "--mode" read as the prompt.
@@ -287,7 +300,8 @@ function resolveModel(cfg, job, override) {
 
 /**
  * Finds the provider that issued a session id, by scanning run metadata. A session id is only
- * valid on the CLI that created it, so resume must not guess.
+ * valid on the CLI that created it, so resume must not guess. The run's `scratch` flag comes back
+ * with it, because a scratch run is the one kind resume cannot reproduce.
  */
 function findRunProvider(session) {
   if (!existsSync(RUNS)) return null;
@@ -302,7 +316,7 @@ function findRunProvider(session) {
       try {
         const m = JSON.parse(readFileSync(join(RUNS, bucket, run, 'meta.json'), 'utf8'));
         if (m.sessionId === session && Object.hasOwn(PROVIDERS, m.provider)) {
-          return { provider: m.provider, model: m.model };
+          return { provider: m.provider, model: m.model, scratch: Boolean(m.scratch) };
         }
       } catch {}
     }
@@ -310,16 +324,28 @@ function findRunProvider(session) {
   return null;
 }
 
+/**
+ * Both flag forms: `--key value` and `--key=value`. Only the space form was read, so the equals
+ * form made the whole of `scratch=true` the key and left `args.scratch` undefined. Every other
+ * flag failed loudly that way, having lost the value the run needed; `--scratch` failed silently,
+ * because it only had to be absent to hand the repository to the model. The split is on the FIRST
+ * `=`, so a value containing one survives intact.
+ */
 function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
-      const key = a.slice(2);
+      const flag = a.slice(2);
+      const eq = flag.indexOf('=');
+      if (eq !== -1) {
+        out[flag.slice(0, eq)] = flag.slice(eq + 1);
+        continue;
+      }
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) out[key] = true;
+      if (next === undefined || next.startsWith('--')) out[flag] = true;
       else {
-        out[key] = next;
+        out[flag] = next;
         i++;
       }
     } else out._.push(a);
@@ -347,6 +373,23 @@ function git(repo, args) {
 
 function isRepo(repo) {
   return git(repo, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
+}
+
+/**
+ * True only when git ran and reported that this path is not a work tree. `!isRepo()` cannot tell
+ * that apart from git failing to run at all - an unparseable global git config makes both false -
+ * and telling someone their directory is wrong would bury git's own reason for the failure. The
+ * `--version` probe answers in any directory and needs no repository, so it fails only when git
+ * itself cannot start.
+ */
+function isNotRepo(repo) {
+  if (isRepo(repo)) return false;
+  try {
+    gitStrict(repo, ['--version']);
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -601,6 +644,28 @@ function distillTranscript(path, maxBytes) {
 }
 
 /**
+ * The parent directory for this user's throwaway checkouts under the system temp dir. The uid is
+ * in the name because on Linux tmpdir() is /tmp, shared by everyone on the machine: the first user
+ * to run created the parent with their own umask and owned it, cleanup() only ever removes the
+ * leaf inside it, and every later user then got EACCES from mkdir and a dead run. macOS never hit
+ * it because its tmpdir() is already per-user. The name still starts with external-advisor, so
+ * whoever finds one of these in /tmp can tell what wrote it. process.getuid is not defined on
+ * Windows, where the temp dir is per-user anyway.
+ */
+function tmpRoot(name) {
+  const uid = typeof process.getuid === 'function' ? `-${process.getuid()}` : '';
+  return join(tmpdir(), `${name}${uid}`);
+}
+
+/**
+ * Exit codes for the signals that must still run cleanup: 128 plus the signal number. SIGHUP is
+ * in the table because Node's default action for it is to terminate without firing 'exit', so
+ * closing a terminal tab or dropping an SSH session mid-run orphaned the PR worktree or the
+ * scratch workspace in the temp dir with nothing left to remove it.
+ */
+const SIGNAL_EXITS = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
+
+/**
  * Checks out a PR head in a throwaway worktree so the reviewer reads the PR's real code, not the
  * local checkout. Uses a private ref namespace and a detached worktree, so no branch is created
  * and the caller's working tree is never touched; cleanup() removes both.
@@ -628,7 +693,7 @@ function preparePr(repo, number) {
   const baseRef = `refs/external-advisor/base-${number}-${token}`;
   // Transient checkouts go to the system temp dir, never inside the repo: a full worktree under
   // .agent-artifacts/ is gitignored but still visible to file watchers, linters and test globs.
-  const worktree = join(tmpdir(), 'external-advisor-worktrees', `pr-${number}-${token}`);
+  const worktree = join(tmpRoot('external-advisor-worktrees'), `pr-${number}-${token}`);
   const cleanupRefs = () => {
     git(repo, ['update-ref', '-d', ref]);
     git(repo, ['update-ref', '-d', baseRef]);
@@ -672,10 +737,10 @@ function preparePr(repo, number) {
     git(repo, ['worktree', 'prune']);
   };
   process.on('exit', cleanup);
-  for (const sig of ['SIGINT', 'SIGTERM']) {
+  for (const [sig, code] of Object.entries(SIGNAL_EXITS)) {
     process.on(sig, () => {
       cleanup();
-      process.exit(sig === 'SIGINT' ? 130 : 143);
+      process.exit(code);
     });
   }
 
@@ -699,6 +764,78 @@ function preparePr(repo, number) {
         ? `${meta.body.slice(0, 4000)}\n\n[...PR description truncated at 4000 of ${meta.body.length} characters...]`
         : meta.body || '',
   };
+}
+
+/**
+ * A throwaway workspace for research questions that are not about this repository. It goes to the
+ * system temp directory rather than inside the repo, for the same reason PR worktrees do: a
+ * directory under the working tree is still picked up by file watchers, linters and test globs
+ * even when it is gitignored.
+ *
+ * It is a git repository because `treeFingerprint` returns null outside one, and a null
+ * fingerprint means the guard runs over the workspace and verifies nothing. The one empty commit
+ * is for completeness rather than necessity: `git status --porcelain` and `ls-files --others`
+ * already catch a created file with no HEAD, but `git diff HEAD` fails, and `git()` swallows that
+ * failure silently. A HEAD keeps all three parts of the fingerprint real.
+ */
+function prepareScratch() {
+  const dir = join(tmpRoot('external-advisor-scratch'), `research-${runId()}`);
+
+  // Registered before the directory exists, and on 'exit' rather than only in a `finally`, so it
+  // covers every path: signals, and a failure inside this function before it ever returns a
+  // cleanup for the caller to call. rmSync is synchronous, so it still runs inside an exit
+  // handler, and `force` makes a directory that was never created a no-op rather than an error.
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    rmSync(dir, { recursive: true, force: true });
+  };
+  process.on('exit', cleanup);
+  for (const [sig, code] of Object.entries(SIGNAL_EXITS)) {
+    process.on(sig, () => {
+      cleanup();
+      process.exit(code);
+    });
+  }
+
+  // Every other failure in this file is reported by fail() as a sentence. Left to throw, a broken
+  // global git config reached main()'s catch and printed a raw JS stack as the `error` string.
+  try {
+    mkdirSync(dir, { recursive: true });
+    gitStrict(dir, ['init', '-q', '-b', 'main']);
+    // Identity and signing come from flags, never from the developer's global config: an empty
+    // commit fails outright where user.email was never set, and blocks on a passphrase prompt
+    // where commit.gpgsign is on globally. Hooks are repo-external here - a global core.hooksPath,
+    // or one copied in by init.templateDir - so they are disabled twice over. --no-verify alone is
+    // not enough: it skips pre-commit and commit-msg but not prepare-commit-msg, which still runs
+    // against this empty commit and fails the whole research run over someone else's checks.
+    // core.hooksPath then points somewhere that cannot hold a hook, so git finds nothing to run.
+    gitStrict(dir, [
+      '-c',
+      'user.email=external-advisor@localhost',
+      '-c',
+      'user.name=external-advisor',
+      '-c',
+      'commit.gpgsign=false',
+      '-c',
+      'core.hooksPath=/dev/null',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '--no-verify',
+      '-m',
+      'scratch',
+    ]);
+  } catch (e) {
+    fail(
+      `could not create the scratch workspace at ${dir}: ${String(e.stderr || e.message)
+        .trim()
+        .slice(0, 300)}`,
+    );
+  }
+
+  return { dir, cleanup };
 }
 
 async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody, timeoutSeconds, resume, extraMeta }) {
@@ -751,8 +888,14 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
 
   const guardAfter = treeFingerprint(repo);
   const wsGuardAfter = ws === repo ? null : treeFingerprint(ws);
-  const treeChanged =
-    (guardBefore !== null && guardBefore !== guardAfter) || (wsGuardBefore !== null && wsGuardBefore !== wsGuardAfter);
+  // Which root moved is kept, not just whether one did. `treeChanged` is the OR of the two, so on
+  // a scratch or PR run it fired without saying where: the repository's `git status` came back
+  // clean, the throwaway workspace was already deleted, and the reader was left guessing which of
+  // the two had been written to.
+  const repoChanged = guardBefore !== null && guardBefore !== guardAfter;
+  const wsChanged = wsGuardBefore !== null && wsGuardBefore !== wsGuardAfter;
+  const changedRoots = [repoChanged ? repo : null, wsChanged ? ws : null].filter(Boolean);
+  const treeChanged = changedRoots.length > 0;
 
   writeFileSync(join(runDir, 'response.json'), res.stdout || res.stderr || '');
 
@@ -772,6 +915,7 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
     timedOut: res.timedOut,
     treeChanged,
     guarded: ws === repo ? [repo] : [repo, ws],
+    changedRoots,
     sessionId: envelope.sessionId || null,
     usage: envelope.usage || null,
     startedAt: new Date(Date.now() - res.elapsedMs).toISOString(),
@@ -795,8 +939,20 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
     treeChanged,
   };
   if (treeChanged) {
-    out.guardViolation =
-      'The working tree changed during this run. A read-only advisor must not write. Inspect `git status` before trusting this output.';
+    // Name the root that moved. "Inspect `git status`" was the only advice given, and it is the
+    // wrong advice when the write landed in a throwaway workspace: that directory is deleted on
+    // the way out, so there is nothing to inspect, and the repository is clean.
+    const moved =
+      repoChanged && wsChanged
+        ? `Both the repository at ${repo} and the throwaway workspace at ${ws} changed during this run.`
+        : repoChanged
+          ? `The repository at ${repo} changed during this run.`
+          : `The throwaway workspace at ${ws} changed during this run, and the repository at ${repo} did not.`;
+    const next = repoChanged
+      ? 'Inspect `git status` in the repository before trusting this output.'
+      : 'That workspace is deleted when the run ends, so there is nothing left to inspect. Your code was not touched, but the model wrote where it was told it could not, so treat the answer as untrusted and check the provider is still read-only.';
+    out.changedRoots = changedRoots;
+    out.guardViolation = `${moved} A read-only advisor must not write. ${next}`;
   }
   process.stdout.write(JSON.stringify(out, null, 2) + '\n');
   process.exitCode = envelope.ok && !treeChanged ? 0 : 1;
@@ -843,6 +999,8 @@ async function doctorReport(cfg, repo) {
       authenticated: false,
       readOnly: p.readOnly,
       readOnlyStrength: p.readOnlyStrength,
+      webAccess: p.webAccess,
+      webNote: p.webNote,
       modelCount: 0,
       models: [],
       modelLabels: {},
@@ -933,6 +1091,23 @@ async function main() {
   resolveRoots();
   const cfg = loadConfig();
   const timeoutSeconds = Number(args.timeout || cfg.timeoutSeconds);
+
+  // --scratch is a boolean, and it is the one flag whose whole job is keeping the repository away
+  // from an external model, so a value on it is refused rather than interpreted. Guessing either
+  // way is wrong: reading `--scratch=false` as "on" ignores what was typed, and reading it as
+  // "off" hands over the repository to someone who asked for isolation.
+  if (Object.hasOwn(args, 'scratch') && args.scratch !== true) {
+    fail(
+      `--scratch takes no value, and "${args.scratch}" was given. Write a bare --scratch to run in a throwaway workspace, or leave the flag out to run in the repository.`,
+    );
+  }
+
+  // parseArgs accepts any --flag, so `resume --scratch` and `consult --scratch` parsed cleanly and
+  // did nothing at all: the user read about the flag, typed it, and got silence.
+  // A missing verb falls through to the verb list below, which is the more useful message.
+  if (args.scratch && verb && verb !== 'research') {
+    fail(`--scratch is not supported by "${verb}"; only research runs in a throwaway workspace`);
+  }
 
   // Doctor's whole job is to report a broken config, so it is the one verb that may load one.
   if (verb !== 'doctor') {
@@ -1143,6 +1318,68 @@ async function main() {
     });
   }
 
+  if (verb === 'research') {
+    // A flag with no value parses as `true`. Reading that as "absent" dropped it in silence:
+    // `--question q --packet` answered the question and ignored the file the user meant to pass.
+    if (args.question === true) fail('research --question was given no text; write --question <text>');
+    if (args.packet === true) fail('research --packet was given no file; write --packet <file>');
+    const question = args.question ? String(args.question) : null;
+    const packetFile = args.packet ? String(args.packet) : null;
+    // Exactly one source. Accepting both would silently drop one, and the caller would have no way
+    // to tell which question the model actually answered.
+    if (question && packetFile) fail('research takes --question or --packet, not both');
+    if (!question && !packetFile) fail('research requires --question <text> or --packet <file>');
+    if (packetFile && !existsSync(packetFile)) fail(`packet file not found: ${packetFile}`);
+    const brief = packetFile ? readFileSync(packetFile, 'utf8') : question;
+    // Resolved before the workspace is built: a missing models.research would otherwise create a
+    // temp git repo and immediately delete it again.
+    const picked = resolveModel(cfg, 'research', args.model);
+    // Checked here for the same reason resolveModel is: invoke() checks it too, but only after
+    // prepareScratch() has built a temp git repo and deleted it again for nothing, and its message
+    // is about a working-tree guard the user never asked for.
+    if (args.scratch && isNotRepo(repo)) {
+      fail(
+        `${repo} is not a git repository, and even --scratch has to be run from inside one. The throwaway workspace is all the model reads, but the repository is still where this run is filed in the history and what the write guard checks afterwards.`,
+      );
+    }
+    // --scratch is for questions that are not about this code. The repo stays the run's durable
+    // identity - history bucket and write guard - while the model only ever sees the temp dir.
+    const scratch = args.scratch ? prepareScratch() : null;
+    try {
+      const body = [
+        readPrompt('research'),
+        '',
+        '---',
+        '',
+        '## The question',
+        '',
+        brief,
+        '',
+        '## Workspace',
+        '',
+        scratch
+          ? 'A throwaway empty directory. There is no project here: answer from sources you fetch, not from files.'
+          : `The repository at ${repo}. Read it when the question is about this code.`,
+        '',
+      ].join('\n');
+      return await invoke({
+        cfg,
+        verb: 'research',
+        repo,
+        workspace: scratch ? scratch.dir : undefined,
+        provider: picked.provider,
+        model: picked.model,
+        packetBody: body,
+        timeoutSeconds,
+        // Recorded so a later reader of meta.json knows the model never saw the repository.
+        // `resume` has no workspace flag, so it cannot reproduce a scratch run.
+        extraMeta: scratch ? { scratch: true } : undefined,
+      });
+    } finally {
+      if (scratch) scratch.cleanup();
+    }
+  }
+
   if (verb === 'resume') {
     const session = args.session;
     const message = args.message;
@@ -1154,6 +1391,15 @@ async function main() {
     if (!origin) {
       fail(
         `no run found for session "${session}"; resume only works from the state directory that started it or the run was pruned (keepRuns)`,
+      );
+    }
+    // The throwaway workspace was deleted when the research run ended, and resume passes no
+    // workspace, so `ws` would fall back to the repository - the code --scratch existed to keep
+    // the model away from. `resume --scratch` is not the answer either: resume never reads that
+    // flag, so it would silently do the same thing.
+    if (origin.scratch) {
+      fail(
+        'cannot resume a scratch run; its workspace was deleted and a resume would run in the repository. Start a fresh research --scratch run instead.',
       );
     }
     // No model unless explicitly given: a resumed session keeps the model it started with, so
@@ -1183,7 +1429,7 @@ async function main() {
     });
   }
 
-  fail(`unknown verb "${verb || ''}". Expected: advise | review | consult | resume | doctor | models | sync-labels`);
+  fail(`unknown verb "${verb || ''}". Expected: advise | review | consult | research | resume | doctor | models | sync-labels`);
 }
 
 main().catch((e) => {

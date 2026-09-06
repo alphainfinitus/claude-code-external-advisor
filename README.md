@@ -4,8 +4,9 @@ A Claude Code skill that gets a second opinion from a different model, without l
 
 It shells out to the [Cursor CLI](https://cursor.com/docs/cli/overview) or the
 [Antigravity CLI](https://antigravity.google/docs/cli) in read-only mode, so GPT-5.x, Grok, Gemini
-or Composer can review a diff, critique the work Claude just did, or answer a design question.
-Each mode picks its own provider and model. Usage bills against whichever account you use.
+or Composer can review a diff, critique the work Claude just did, answer a design question, or
+research something and come back with sources. Each mode picks its own provider and model. Usage
+bills against whichever account you use.
 
 ## Why
 
@@ -20,6 +21,7 @@ convincing.
 | `advise` | Critiques the work your agent just did | The session transcript, distilled and forwarded automatically |
 | `review` | Fresh-eyes review of a diff, branch, or GitHub PR | The diff and the repository, deliberately not your reasoning |
 | `consult` | Answers a written question | The briefing you compose, plus the repository it can read |
+| `research` | Looks something up and returns findings with sources and verbatim quotes | The question, plus either the repository or an empty throwaway directory with `--scratch` |
 
 ## Requirements
 
@@ -62,7 +64,7 @@ In Claude Code, first time only:
 set up the external advisor
 ```
 
-That runs a health check, asks you to pick a model for each of the three modes, and writes the
+That runs a health check, asks you to pick a model for each of the four modes, and writes the
 config.
 
 Then just ask for what you want. The skill picks the mode from the shape of the request:
@@ -72,6 +74,7 @@ review PR 1234 with the external advisor
 sanity-check my approach, use external-advisor
 what would GPT say about this design?
 review this diff using grok
+research what changed in the Antigravity CLI this month
 ```
 
 Naming a model in the request overrides the configured one for that run.
@@ -93,7 +96,7 @@ The config file in that directory:
 
 | Key | Meaning |
 |---|---|
-| `models.review` / `.advise` / `.consult` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required; there is no separate provider key. |
+| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required; there is no separate provider key. |
 | `timeoutSeconds` | Hard kill for a run. Default 900. |
 | `keepRuns` | Run folders kept per repository. Default 20. |
 | `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy ignores it. |
@@ -104,8 +107,12 @@ Ask Claude to "change the external advisor models" to re-run the picker rather t
 by hand.
 
 Two notes on choosing models. Avoid `claude-*` for review and consult on either provider, since a
-Claude checking Claude's work defeats the purpose. Avoid `claude-fable-*` entirely, which Cursor
-flags as NO ZDR, meaning prompts are retained.
+Claude checking Claude's work defeats the purpose; research is exempt, because it judges nothing
+Claude wrote. Avoid `claude-fable-*` entirely, which Cursor flags as NO ZDR, meaning prompts are
+retained. For research, check `webAccess` in `doctor` before picking: `restricted` means that
+provider's web reach was measured to be limited, so web lookups there are unreliable. What the
+limit actually is differs per provider and is recorded in its `webNote`. Digesting local files
+still works either way.
 
 ## How it works
 
@@ -124,8 +131,8 @@ Print mode alone is not read-only at all. Cursor's own help says `-p` "has acces
 including write and shell". Ask mode refuses mutating tool calls at dispatch.
 
 agy's plan mode is a slash-command expansion, so it is an instruction rather than a permission
-gate. It blocked writes and shell in every test. It does not survive a resume, so the runner sends
-it on every call. agy's own `--sandbox` restricts nothing relevant, so it is not used.
+gate, and it has been seen not to hold. It does not survive a resume, so the runner sends it on
+every call. agy's own `--sandbox` restricts nothing relevant, so it is not used.
 
 Two further layers back them up: `sandbox` in config (Cursor only), and a content fingerprint of
 the working tree taken before and after each run, which fails the run if anything moved.
@@ -135,8 +142,11 @@ Shell, edits and MCP servers are blocked on Cursor.
 
 On agy, plan mode removes nothing from the tool list. Measured on agy 1.1.26: the session still
 lists file write, shell, subagents, web search, browser control and MCP tools. Plan mode is only an
-instruction to the model. In tests it obeyed. The fingerprint guard is what catches a write. Whether
-an agy subagent inherits the plan-mode instruction was not measured.
+instruction to the model, and the model does not always follow it. On 2026-09-05, on agy 1.1.27, a
+read-only review run wrote a 6795-byte `AGENTS.md` into the repository root that nobody had asked
+for. That is one observed instance, not a rate. The fingerprint guard caught it and failed the run.
+It is the only thing that does. Whether an agy subagent inherits the plan-mode instruction was not
+measured.
 
 Web fetching is not blocked outright: the tool is dispatched and rejected per URL. Measured on
 Cursor, `cursor.com` succeeds while `example.com`, `github.com`, `docs.anthropic.com` and
@@ -149,15 +159,21 @@ every exit path.
 
 ## Privacy
 
-All three modes run with the repository as the model's workspace, so it can read repository files
-in any mode, and does. What differs is the transcript.
+Every mode runs with the repository as the model's workspace by default, so it can read repository
+files, and does. `research --scratch` is the exception: it hands over an empty throwaway directory
+that is deleted when the run ends. What otherwise differs between modes is the transcript.
 
 `advise` additionally forwards a distilled copy of the session to the provider's model vendor -
 Cursor's model providers on `cursor`, Google on `agy` - including any tool output that passed
 through it, and keeps a copy on disk. `agy` also keeps a full copy of every conversation under
 `~/.gemini/antigravity-cli/`, outside this skill's control. Tell people that before they use it.
-`review` and `consult` forward no transcript, only the packet you or the skill composed, so those
-are the modes to use when session contents matter.
+`review`, `consult` and `research` forward no transcript, only the packet you or the skill
+composed, so those are the modes to use when session contents matter. `research --scratch` is the
+most private of the four: no transcript, and not even the repository. Not nothing, though. The
+model is still handed the run directory, a path under the skill's state directory - which by
+default sits in your home directory, so it carries your username as well as this repository's
+name. On `agy` the workspace is only the process working directory, so nothing stops a read
+outside it.
 
 Packets and raw responses are written to the state directory's `runs/` and kept for the last
 `keepRuns` runs per repository. They contain full diffs.
@@ -173,6 +189,11 @@ Packets and raw responses are written to the state directory's `runs/` and kept 
   and tool calls but not internal reasoning.
 - Called from inside a subagent, `advise` cannot detect that it is a subagent and will forward the
   parent session. Pass `--context <file>` there.
+- A research finding is only as good as its quote. Check the quote against the source before
+  relaying it, and treat anything in `unverified` as a guess.
+- Web reach is a per-provider measurement recorded in `doctor`, not a guarantee. A `restricted`
+  rating means that provider's reach was measured to be limited, and its `webNote` says how;
+  Cursor's is an allow-list on URL fetch. Re-check after a CLI upgrade.
 
 ## License
 

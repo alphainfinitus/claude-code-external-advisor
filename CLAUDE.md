@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Claude Code skill (`skill/`) that shells out to a second coding-agent CLI to get a second opinion
 from a non-Claude model. Two are supported: the Cursor CLI (`cursor-agent`, `--mode ask`) and the
-Google Antigravity CLI (`agy`, `--mode plan`). Each job (`review`, `advise`, `consult`) picks its
+Google Antigravity CLI (`agy`, `--mode plan`). Each job (`review`, `advise`, `consult`, `research`) picks its
 own provider and model. `README.md` covers the user-facing story (modes, privacy, config keys);
 `skill/SKILL.md` is the runtime instruction doc Claude follows when the skill is invoked. Don't
 duplicate either here.
@@ -16,7 +16,7 @@ duplicate either here.
 No build, no lint, no dependencies. The runner is stdlib-only Node (ESM, `.mjs`).
 
 ```bash
-node --test skill/run.test.mjs                                   # full suite (~9s, 27 tests)
+node --test skill/run.test.mjs                                   # full suite (~16s, 47 tests)
 node --test --test-name-pattern "write guard" skill/run.test.mjs # one describe/it by name
 node skill/run.mjs doctor                                        # health check: binary, auth, live model list, resolved paths
 ./install.sh                                                     # copy skill/ to ~/.claude/skills/external-advisor/
@@ -37,8 +37,8 @@ Three artifacts must stay in sync when behaviour changes:
   format Claude is told to use. It's what the model reads at runtime, so a flag or envelope key
   that exists in the code but not here is effectively invisible.
 - `skill/run.mjs` implements them. Single file, no modules: `main()` dispatches on the verb
-  (`review`, `consult`, `advise`, `resume`, `doctor`, `sync-labels`, `models`), builds a packet, and
-  calls `invoke()`.
+  (`review`, `consult`, `advise`, `research`, `resume`, `doctor`, `sync-labels`, `models`), builds a
+  packet, and calls `invoke()`.
 - `skill/prompts/<verb>.md` are loaded by name via `readPrompt(verb)` and prepended to the packet.
   Renaming a verb means renaming its prompt file.
 
@@ -70,10 +70,13 @@ model id.
 format. Each entry carries `bin`, `installHint`, `loginHint`, `readOnly` (the flag that makes the
 run read-only), `readOnlyStrength` (`"dispatch"` when the CLI refuses the tool call, `"prompt"`
 when the model is merely told), `buildArgs`, `listModels` (which doubles as the auth probe), and
-`parse`. Two are optional: `verifySession(requested, returned)` and `warnings(run)`. `parse`
-returns the normalized `{ok, text, sessionId, usage, error}` or `null`, and `invoke()` reads
-nothing else, so adding a CLI (codex, gemini) touches no run, guard or persistence logic.
-`buildArgs` must produce a read-only invocation.
+`parse`, plus `webAccess` (`full` or `restricted`) and `webNote`, the measured web reach that only
+`doctorReport` surfaces, for SKILL.md's setup step to read when a model is picked. No run path
+checks them, so a one-off `research --model cursor/<id>` gets no `restricted` warning anywhere.
+Two are optional: `verifySession(requested, returned)` and
+`warnings(run)`. `parse` returns the normalized `{ok, text, sessionId, usage, error}` or `null`,
+and `invoke()` reads nothing else, so adding a CLI (codex, gemini) touches no run, guard or
+persistence logic. `buildArgs` must produce a read-only invocation.
 
 **`advise` locates the transcript itself** via `CLAUDE_CODE_SESSION_ID` and
 `~/.claude/projects/<repo-path-slug>/<sid>.jsonl`, then distils it (`distillTranscript`). It cannot
@@ -91,3 +94,11 @@ tell when it is running inside a subagent, which is why SKILL.md insists on `--c
   never silent.
 - The skill must work unchanged from `~/.claude/skills/` and from a repo's `.agents/skills/` or
   `.claude/skills/`, so nothing may hardcode a home path.
+- The lineage rule (avoid `claude-*`) stops at `research`, which judges nothing Claude wrote. The
+  `claude-fable-*` exclusion does not stop there: it is about prompt retention, not lineage.
+- `webAccess` and `webNote` on a `PROVIDERS` entry are measurements, not policy. `research` runs on
+  whatever provider its job names; a `restricted` rating narrows what it can do, never whether it
+  runs. Re-measure after a CLI upgrade.
+- `research --scratch` builds its workspace under the system temp dir, `git init` plus one empty
+  commit so the fingerprint guard has a HEAD to compare against, and removes it on every exit path
+  including signals. Never put it inside the repo.
