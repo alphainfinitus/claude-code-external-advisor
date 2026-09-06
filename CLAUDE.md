@@ -16,7 +16,7 @@ duplicate either here.
 No build, no lint, no dependencies. The runner is stdlib-only Node (ESM, `.mjs`).
 
 ```bash
-node --test skill/run.test.mjs                                   # full suite (~15s, 41 tests)
+node --test skill/run.test.mjs                                   # full suite (~16s, 47 tests)
 node --test --test-name-pattern "write guard" skill/run.test.mjs # one describe/it by name
 node skill/run.mjs doctor                                        # health check: binary, auth, live model list, resolved paths
 ./install.sh                                                     # copy skill/ to ~/.claude/skills/external-advisor/
@@ -70,8 +70,10 @@ model id.
 format. Each entry carries `bin`, `installHint`, `loginHint`, `readOnly` (the flag that makes the
 run read-only), `readOnlyStrength` (`"dispatch"` when the CLI refuses the tool call, `"prompt"`
 when the model is merely told), `buildArgs`, `listModels` (which doubles as the auth probe), and
-`parse`, plus `webAccess` (`full` or `restricted`) and `webNote`, the measured web reach that
-`research` and setup read. Two are optional: `verifySession(requested, returned)` and
+`parse`, plus `webAccess` (`full` or `restricted`) and `webNote`, the measured web reach that only
+`doctorReport` surfaces, for SKILL.md's setup step to read when a model is picked. No run path
+checks them, so a one-off `research --model cursor/<id>` gets no `restricted` warning anywhere.
+Two are optional: `verifySession(requested, returned)` and
 `warnings(run)`. `parse` returns the normalized `{ok, text, sessionId, usage, error}` or `null`,
 and `invoke()` reads nothing else, so adding a CLI (codex, gemini) touches no run, guard or
 persistence logic. `buildArgs` must produce a read-only invocation.

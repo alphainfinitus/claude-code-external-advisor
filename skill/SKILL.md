@@ -355,10 +355,11 @@ use your own WebSearch: a run costs 30-150s, which is not worth paying to look u
   write guard checks. Outside one the run is refused before anything is created.
 - Without `--scratch` the repository is the workspace, so file-based questions work with no setup.
 - `treeChanged` on a scratch run means the repository moved **or** the throwaway directory did:
-  both are fingerprinted, and the flag is the OR of the two. Check `git status` in the repository
-  first — that is the one that matters and the one you can still inspect. The throwaway directory
-  is already deleted by then, so the envelope's "inspect `git status`" advice cannot be followed
-  for it. Say which one you found moved.
+  both are fingerprinted, and the flag is the OR of the two. The envelope tells you which:
+  `changedRoots` lists the paths that moved, and `guardViolation` names them in words. If only the
+  throwaway directory moved, your code was not touched and there is nothing left to inspect — it
+  is deleted by then. If the repository is in the list, check `git status` there. Say which one
+  moved when you report it.
 - **A scratch run cannot be resumed. The runner refuses it.** `resume` has no workspace flag, so a
   follow-up would run in the repository — the thing `--scratch` existed to prevent — and the
   throwaway directory is deleted by then anyway. Start a fresh `research --scratch` run instead.
@@ -424,9 +425,11 @@ fails instead of answering from a fresh conversation. Cursor has no such check.
 ## Reading the result
 
 Output is one JSON envelope on stdout: `{ok, result, verb, sessionId, runDir, packetPath, provider,
-model, usage, elapsedMs, treeChanged}`, plus `guardViolation` when `treeChanged` is true. A
-`research --scratch` run also carries `"scratch": true`. The full packet and raw
-response are kept in `runDir` (last 20 runs per repo).
+model, usage, elapsedMs, treeChanged}`, plus `guardViolation` and `changedRoots` when `treeChanged`
+is true. `changedRoots` lists the paths that moved: the repository, the throwaway workspace, or
+both. A `research --scratch` run also carries `"scratch": true`. The full packet and raw
+response are kept in `runDir` (last 20 runs per repo). `meta.json` in `runDir` records
+`changedRoots` on every run, alongside `guarded`, the roots that were watched.
 
 `result` is the model's prose, ending in a fenced JSON block (verdict + findings for review,
 recommendation + risk for consult, sourced findings + `tools_used` for research). Render the prose
@@ -468,11 +471,18 @@ either one would otherwise review the PR against an out-of-date base. If a PR re
 bigger than the PR, check the stat block for already-merged commits.
 
 If `treeChanged` is true the run is marked failed even when the model answered: a read-only advisor
-writing to the tree means something is wrong with the invocation. Say so loudly and have the user
-check `git status` before trusting anything from that run. Then run `node $SKILL/run.mjs doctor`
-and show `providers.<provider>.warnings` verbatim. On `agy` the usual cause is
-`toolPermission: always-proceed`, which leaves plan mode - an instruction, not a refusal - as the
-only guard.
+writing to the tree means something is wrong with the invocation. Say so loudly, and read
+`changedRoots` before you say anything about it - the write may not have landed in the user's code.
+
+- The repository is in `changedRoots`: the user's own tree was written to. Have them check
+  `git status` there before trusting anything from that run.
+- Only a throwaway workspace is listed (`research --scratch`, or `review --pr`): the user's code
+  was not touched, and that directory is deleted when the run ends, so there is nothing to inspect.
+  The invocation is still broken - a read-only run wrote a file - so the answer is untrusted.
+
+Either way, run `node $SKILL/run.mjs doctor` and show `providers.<provider>.warnings` verbatim.
+On `agy` the usual cause is `toolPermission: always-proceed`, which leaves plan mode - an
+instruction, not a refusal - as the only guard.
 
 The fingerprint hashes the status list, the tracked diff, and size+mtime of untracked files,
 because porcelain output alone reports only status codes and paths - an already-dirty file can
@@ -482,7 +492,7 @@ be edited further without its status line moving. Git-ignored files are out of s
 
 `node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
-both providers end to end, and the research verb's argument rules and scratch cleanup. 41 tests.
+both providers end to end, and the research verb's argument rules and scratch cleanup. 47 tests.
 The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so it needs no network and no account with
 either vendor. Run it after a Cursor CLI or Antigravity CLI upgrade, alongside re-checking what
 `--mode ask` and `--mode plan` actually block.

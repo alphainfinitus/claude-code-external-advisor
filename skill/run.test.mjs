@@ -917,6 +917,31 @@ describe('research', () => {
     assert.equal(existsSync(ws), false, 'a hangup must not orphan the throwaway workspace');
     assert.equal(status, 129, 'a signal exit must be 128 + the signal number');
   });
+
+  it('names the throwaway workspace, not the repository, when only it was written to', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('scratch-guard-root'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    // The stub writes into its own working directory, which is the scratch workspace.
+    const bin = stubBin({
+      'cursor-agent': [
+        `case "$1" in`,
+        `  --list-models) printf 'm1 - M1 (current)\\n'; exit 0 ;;`,
+        `esac`,
+        `echo written > ./from-the-model.txt`,
+        AGENT_OK,
+      ].join('\n'),
+    });
+
+    // treeChanged is the OR of both fingerprints, so it said only that something moved. The
+    // repository was clean and the workspace already deleted, leaving nothing to check.
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.treeChanged, true);
+    assert.deepEqual(out.changedRoots.includes(repo), false, 'the repository was not the root that moved');
+    assert.match(out.guardViolation, /The throwaway workspace at .* changed/);
+  });
 });
 
 describe('agy resume', () => {

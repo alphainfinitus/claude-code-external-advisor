@@ -888,8 +888,14 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
 
   const guardAfter = treeFingerprint(repo);
   const wsGuardAfter = ws === repo ? null : treeFingerprint(ws);
-  const treeChanged =
-    (guardBefore !== null && guardBefore !== guardAfter) || (wsGuardBefore !== null && wsGuardBefore !== wsGuardAfter);
+  // Which root moved is kept, not just whether one did. `treeChanged` is the OR of the two, so on
+  // a scratch or PR run it fired without saying where: the repository's `git status` came back
+  // clean, the throwaway workspace was already deleted, and the reader was left guessing which of
+  // the two had been written to.
+  const repoChanged = guardBefore !== null && guardBefore !== guardAfter;
+  const wsChanged = wsGuardBefore !== null && wsGuardBefore !== wsGuardAfter;
+  const changedRoots = [repoChanged ? repo : null, wsChanged ? ws : null].filter(Boolean);
+  const treeChanged = changedRoots.length > 0;
 
   writeFileSync(join(runDir, 'response.json'), res.stdout || res.stderr || '');
 
@@ -909,6 +915,7 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
     timedOut: res.timedOut,
     treeChanged,
     guarded: ws === repo ? [repo] : [repo, ws],
+    changedRoots,
     sessionId: envelope.sessionId || null,
     usage: envelope.usage || null,
     startedAt: new Date(Date.now() - res.elapsedMs).toISOString(),
@@ -932,8 +939,20 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
     treeChanged,
   };
   if (treeChanged) {
-    out.guardViolation =
-      'The working tree changed during this run. A read-only advisor must not write. Inspect `git status` before trusting this output.';
+    // Name the root that moved. "Inspect `git status`" was the only advice given, and it is the
+    // wrong advice when the write landed in a throwaway workspace: that directory is deleted on
+    // the way out, so there is nothing to inspect, and the repository is clean.
+    const moved =
+      repoChanged && wsChanged
+        ? `Both the repository at ${repo} and the throwaway workspace at ${ws} changed during this run.`
+        : repoChanged
+          ? `The repository at ${repo} changed during this run.`
+          : `The throwaway workspace at ${ws} changed during this run, and the repository at ${repo} did not.`;
+    const next = repoChanged
+      ? 'Inspect `git status` in the repository before trusting this output.'
+      : 'That workspace is deleted when the run ends, so there is nothing left to inspect. Your code was not touched, but the model wrote where it was told it could not, so treat the answer as untrusted and check the provider is still read-only.';
+    out.changedRoots = changedRoots;
+    out.guardViolation = `${moved} A read-only advisor must not write. ${next}`;
   }
   process.stdout.write(JSON.stringify(out, null, 2) + '\n');
   process.exitCode = envelope.ok && !treeChanged ? 0 : 1;
