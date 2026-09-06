@@ -348,6 +348,8 @@ use your own WebSearch: a run costs 30-150s, which is not worth paying to look u
 - `--scratch` runs it in an empty throwaway directory instead of the repository. Use it whenever
   the question is not about this code: the model then has no local files to read, and nothing of
   yours goes into the workspace. The directory is removed on every exit path.
+- Write `--scratch` on its own. It takes no value: `--scratch=true` and `--scratch false` are both
+  refused, because guessing what a value means could hand over the repository.
 - Without `--scratch` the repository is the workspace, so file-based questions work with no setup.
 - `treeChanged` on a scratch run means the repository moved **or** the throwaway directory did:
   both are fingerprinted, and the flag is the OR of the two. Check `git status` in the repository

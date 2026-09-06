@@ -167,6 +167,46 @@ function runCli(args, { home, bin, omitBin, env: extraEnv } = {}) {
   }
 }
 
+describe('flag forms', () => {
+  it('reads --key=value, keeping a value that contains its own separators', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('equals-form'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const bin = stubBin({ agy: agyStub(), 'cursor-agent': cursorStub() });
+
+    // parseArgs only split on a space, so the whole of `model=agy/...` became the key and the flag
+    // was silently dropped. Splitting on the first `=` alone keeps the slash in the value.
+    const out = runCli(['research', '--repo', repo, '--model=agy/gemini-3.1-pro-high', '--question', 'anything'], {
+      home,
+      bin,
+    });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.provider, 'agy', 'the equals form must reach the same flag as the space form');
+    assert.equal(out.model, 'gemini-3.1-pro-high', 'the value must survive the slash inside it');
+  });
+
+  it('refuses a value on --scratch instead of guessing what it meant', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('scratch-with-value'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    // `--scratch=true` used to parse as a key named `scratch=true`, leaving args.scratch undefined:
+    // the run handed the repository to the model with no warning and no `scratch` in the envelope.
+    // Reading it as "on" now would be a guess, and reading `--scratch=false` as "off" would be the
+    // same failure again, so a value is an error either way.
+    const out = runCli(['research', '--repo', repo, '--scratch=true', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /--scratch takes no value/);
+    assert.equal(existsSync(log), false, 'the refusal must land before the model is given a workspace');
+  });
+});
+
 describe('write guard', () => {
   it('refuses to run outside a git repository', () => {
     const home = tmp('home');

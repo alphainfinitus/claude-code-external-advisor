@@ -324,16 +324,28 @@ function findRunProvider(session) {
   return null;
 }
 
+/**
+ * Both flag forms: `--key value` and `--key=value`. Only the space form was read, so the equals
+ * form made the whole of `scratch=true` the key and left `args.scratch` undefined. Every other
+ * flag failed loudly that way, having lost the value the run needed; `--scratch` failed silently,
+ * because it only had to be absent to hand the repository to the model. The split is on the FIRST
+ * `=`, so a value containing one survives intact.
+ */
 function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
-      const key = a.slice(2);
+      const flag = a.slice(2);
+      const eq = flag.indexOf('=');
+      if (eq !== -1) {
+        out[flag.slice(0, eq)] = flag.slice(eq + 1);
+        continue;
+      }
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) out[key] = true;
+      if (next === undefined || next.startsWith('--')) out[flag] = true;
       else {
-        out[key] = next;
+        out[flag] = next;
         i++;
       }
     } else out._.push(a);
@@ -1021,6 +1033,16 @@ async function main() {
   resolveRoots();
   const cfg = loadConfig();
   const timeoutSeconds = Number(args.timeout || cfg.timeoutSeconds);
+
+  // --scratch is a boolean, and it is the one flag whose whole job is keeping the repository away
+  // from an external model, so a value on it is refused rather than interpreted. Guessing either
+  // way is wrong: reading `--scratch=false` as "on" ignores what was typed, and reading it as
+  // "off" hands over the repository to someone who asked for isolation.
+  if (Object.hasOwn(args, 'scratch') && args.scratch !== true) {
+    fail(
+      `--scratch takes no value, and "${args.scratch}" was given. Write a bare --scratch to run in a throwaway workspace, or leave the flag out to run in the repository.`,
+    );
+  }
 
   // parseArgs accepts any --flag, so `resume --scratch` and `consult --scratch` parsed cleanly and
   // did nothing at all: the user read about the flag, typed it, and got silence.
