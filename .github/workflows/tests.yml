@@ -1,6 +1,6 @@
-# Runs the runner's regression suite. The tests stub `gh`, `cursor-agent` and `agy` as shell
-# scripts on PATH and keep every repository under the OS temp directory, so a runner needs
-# nothing but git and Node: no network, no account with either vendor, no secrets.
+# Runs the runner's regression suite. The tests stub `gh`, `cursor-agent`, `agy` and `codex` as
+# shell scripts on PATH and keep every repository under the OS temp directory, so a runner needs
+# nothing but git and Node: no network, no account with any vendor, no secrets.
 name: tests
 
 on:

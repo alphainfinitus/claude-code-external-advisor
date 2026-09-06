@@ -107,9 +107,11 @@ else
 fi
 
 echo
-echo "You need at least one provider. Install either or both:"
+echo "You need at least one provider. Install any of them:"
 echo "  Cursor:      curl https://cursor.com/install -fsS | bash   then  cursor-agent login"
 echo "  Antigravity: https://antigravity.google/docs/cli           then  agy"
+echo "  Codex:       brew install codex                            then  codex login"
+echo "               (or: npm install -g @openai/codex)"
 
 echo
 echo 'Then, in Claude Code: "set up the external advisor"'

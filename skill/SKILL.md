@@ -1,6 +1,6 @@
 ---
 name: external-advisor
-description: Get a second opinion from a different AI model (GPT-5.x, Grok, Gemini, Composer) through the Cursor CLI or the Google Antigravity CLI, without leaving Claude Code. Use whenever the user asks for an external review, a second opinion, a sanity check from another model, "what would GPT/Gemini/Codex/Cursor say", "am I missing something", "check my approach", wants a PR or diff or design judged by something that isn't Claude, or is stuck on a decision where independent judgement helps - and whenever they name it directly ("use the external-advisor", "/external-advisor"). Also use when the user wants something looked up or researched - library docs, API changes, comparing tools, "what's the current best way to", "find out about", or digesting a large codebase or doc set. Four modes - advise (critique the work THIS agent just did), review (a diff or PR), consult (a question), research (the web or a large file set, sourced). Read this before running cursor-agent or agy by hand.
+description: Get a second opinion from a different AI model (GPT-5.x, Grok, Gemini, Composer) through the Cursor, Antigravity or OpenAI Codex CLI, without leaving Claude Code. Use whenever the user asks for an external review, a second opinion, a sanity check from another model, "what would GPT/Gemini/Codex/Cursor say", "am I missing something", "check my approach", wants a PR or diff or design judged by something that isn't Claude, or is stuck on a decision where independent judgement helps - and whenever they name it directly ("use the external-advisor", "/external-advisor"). Also use when the user wants something looked up or researched - library docs, API changes, comparing tools, "what's the current best way to", "find out about", or digesting a large codebase or doc set. Four modes - advise (critique the work THIS agent just did), review (a diff or PR), consult (a question), research (the web or a large file set, sourced). Read this before running cursor-agent, agy or codex by hand.
 ---
 
 # External advisor
@@ -9,29 +9,36 @@ Runs a **different model** over your work and brings its answer back here. The p
 diversity: Claude reviewing Claude's code shares Claude's blind spots, and a model that never saw
 the reasoning has no reason to find it convincing.
 
-Two provider CLIs are supported. Each job picks one, in config.
+Three provider CLIs are supported. Each job picks one, in config.
 
 | Provider | CLI | Needs | Read-only flag | How strong that guard is |
 |---|---|---|---|---|
 | `cursor` | `cursor-agent` | a Cursor account | `--mode ask` | **dispatch** - the CLI refuses write and shell tool calls |
 | `agy` | `agy` (Google Antigravity) | a Google sign-in | `--mode plan` | **prompt** - the model is *told* not to write; nothing refuses it |
+| `codex` | `codex` (OpenAI Codex) | an OpenAI/ChatGPT sign-in | `-s read-only` | **dispatch** - each write route tried was blocked: the patch tool by the CLI, a shell write by the OS sandbox |
 
-Only one of the two has to be installed. Whatever is missing simply cannot be picked.
+Only one of the three has to be installed. Whatever is missing simply cannot be picked.
 
 "Dispatch" means the tool call is rejected by the CLI itself. "Prompt" means it is only an
-instruction to the model. Neither is a security boundary.
+instruction to the model. Strongest guard first: `codex`, then `cursor`, then `agy`. None of the
+three is a security boundary.
 
 On agy, plan mode leaves the full tool list in place: file write, shell, subagents, web search,
 browser control and MCP tools all stay listed (measured on agy 1.1.26). Only the instruction and
 the fingerprint guard stand between the model and a write, and the instruction has been seen to
 fail: on 2026-09-05, on agy 1.1.27, a read-only review run wrote an `AGENTS.md` into the repository
 root that nobody had asked for. One observed instance, not a rate. The fingerprint guard caught it
-and failed the run. Both providers can spawn their own
-subagents; on agy, whether a subagent inherits plan mode was not measured.
+and failed the run. Cursor and agy can both spawn their own subagents; on agy, whether a subagent
+inherits plan mode was not measured.
+
+On codex two write routes were tried when measured (codex-cli 0.153.4, 2026-09-06), and each was
+blocked by a different layer: the patch tool was refused by the CLI, and a shell redirect into a
+new file failed at the OS sandbox. No file appeared either time. No single write was seen blocked
+by both layers. Whether codex spawns its own subagents was not measured.
 
 Two further layers back them up:
 
-- `sandbox` in config, which maps to Cursor's `--sandbox`. agy ignores it.
+- `sandbox` in config, which maps to Cursor's `--sandbox`. agy and codex ignore it.
 - A content fingerprint of the working tree taken before and after every run. If anything moved,
   the run is marked failed even when the model answered.
 
@@ -50,11 +57,20 @@ not skip a step because it looks like a formality — the question order and the
 are the point.
 
 Never guess at model IDs — they rot fast, and `doctor` is the live list per provider. Steer away
-from `claude-*` for `review` and `consult` on **either** provider: a Claude reviewing Claude's work
+from `claude-*` for `review` and `consult` on **any** provider: a Claude reviewing Claude's work
 defeats the purpose. agy's catalogue includes `claude-sonnet-4-6` and `claude-opus-4-6-thinking`,
-so that rule applies there too. It stops at `research`, which judges nothing Claude wrote. Never
-offer `claude-fable-*`, which Cursor flags **NO ZDR**, meaning prompts are retained. That NO ZDR
-note is Cursor-specific.
+so that rule applies there too. On 2026-09-06 codex's live list carried no `claude-*` model, so the
+rule had nothing to bite on there — one snapshot, not a promise, so read `doctor` rather than this
+line. It stops at `research`, which judges nothing Claude wrote. Never offer `claude-fable-*`,
+which Cursor flags **NO ZDR**, meaning prompts are retained. That NO ZDR note is Cursor-specific.
+
+On `codex` a model id carries its reasoning effort as a suffix: `codex/gpt-5.6-terra:xhigh`. The
+part after the last colon is the effort. The valid values are `low`, `medium`, `high`, `xhigh`,
+`max` and `ultra`, and not every model offers every one, so take the combinations `doctor` lists
+rather than composing your own. A *bare slug* is a codex model id with no `:<effort>` on the end.
+`doctor` lists one only for a model that offers no efforts at all, so a bare slug in the config was
+almost always typed by hand rather than copied from `doctor`. Codex runs a bare slug at its own
+default effort.
 
 ## Where the runner lives
 
@@ -157,8 +173,12 @@ without it you get a general assessment.
 whole session - including tool output that merely passed through it, such as ticket contents,
 log queries or internal search results - to the vendor behind the configured provider. On `agy`
 that is Google, which also keeps its own copy under `~/.gemini/antigravity-cli/`, outside this
-skill's control. `review`, `consult` and `research` forward no transcript, so those are the
-modes for when session contents matter. Step 6 of `references/setup.md` is the full version.
+skill's control. On `codex` that is OpenAI, which keeps its own copy of every session under
+`~/.codex/sessions/`, also outside this skill's control. There the runner passes
+`--ignore-user-config`, so the user's own codex MCP servers do not spawn during a run. That is not
+a full seal: global skills under `~/.agents` and `~/.codex/plugins` are still read. `review`,
+`consult` and `research` forward no transcript, so those are the modes for when session contents
+matter. Step 6 of `references/setup.md` is the full version.
 
 It differs from the built-in `advisor` in one way worth knowing: Claude Code persists thinking
 blocks with their text stripped, so your *internal reasoning* is not on disk and cannot be
@@ -231,12 +251,13 @@ node $SKILL/run.mjs review --repo /path/to/repo \
   change is *for* can only find syntax problems.
 - `--model <provider>/<model>` overrides both provider and model for a single run, without
   touching config. A bare `--model <id>` keeps the job's configured provider and swaps only the
-  model.
+  model. On `codex` the effort suffix is part of the model half:
+  `--model codex/gpt-5.6-terra:xhigh`.
 
 When the user names a model in their request ("review PR 1234 with Sol", "what does Gemini think",
 "use gpt-5.6-sol-high"), pass it through as `--model` rather than editing config - they want it for
-that run, not as a new default. Resolve friendly names against `modelLabels` for **both** providers
-and the live lists from `doctor`. If the same friendly name exists on both providers, ask which.
+that run, not as a new default. Resolve friendly names against `modelLabels` for **every** provider
+and the live lists from `doctor`. If the same friendly name exists on more than one, ask which.
 Don't guess an id. Say which provider and model actually ran when you report back, since it differs
 from the usual one.
 
@@ -314,8 +335,9 @@ use your own WebSearch: a run costs 30-150s, which is not worth paying to look u
 `restricted` means that provider's web reach was measured to be limited. What the limit is differs
 from provider to provider, so read its `webNote` for what was actually measured. Treat web lookups
 on a `restricted` provider as unreliable; digesting local files still works either way. Cursor is
-the only `restricted` provider today; its `webNote` records an allow-list on URL fetch, and a
-search tool that was never measured. Check the report's `tools_used` block afterwards.
+still the only `restricted` provider; its `webNote` records an allow-list on URL fetch, and a
+search tool that was never measured. `agy` and `codex` are both `full`. Check the report's
+`tools_used` block afterwards.
 
 ### Reading a research result
 
@@ -363,8 +385,9 @@ original run's saved metadata, so you pass only `--session` and `--message`.
 A `research --scratch` run is the one thing you cannot resume, and the runner refuses it rather
 than quietly running the follow-up in the repository.
 
-On `agy`, if the reply carries a different conversation id than the one you asked for, the run
-fails instead of answering from a fresh conversation. Cursor has no such check.
+On `agy` and `codex`, if the reply carries a different conversation id than the one you asked for,
+the run fails instead of answering from a fresh conversation. Cursor has no such check. An id
+`codex` does not recognise fails outright rather than quietly starting a new thread.
 
 ## Reading the result
 
@@ -397,13 +420,21 @@ binary, missing packet file, bad config) carry only `error`, plus hints such as 
 plain-text and self-explanatory (invalid API key, unknown model, timeout), and paraphrasing
 them loses the fix. Don't retry a failed run unchanged.
 
-Every run pre-flights its provider before it writes a packet or spawns anything. Two failures
-come from there, and both are fixed by the user, not by retrying:
+When a CLI exits non-zero but said why, `error` is that reason rather than `<bin> exited <n>`, and
+`raw` quotes the stream the reason was on. So a model id the account cannot use reports
+`The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.` Relay it as
+given: it names the fix. A bare `<bin> exited <n>` means the CLI died without explaining itself,
+and then `raw` is all there is.
 
+Every run pre-flights its provider before it writes a packet or spawns anything. Three failures
+come from there, and all are fixed by the user, not by retrying:
+
+- `unknown codex reasoning effort "<x>" in model "<id>"; valid efforts are ...` — the `:<effort>`
+  suffix is not one codex takes. Fix the `--model` you passed, or run setup to fix the config.
 - `<bin> not found on PATH` — carries `installHint` and `thenRun`. The CLI is not installed.
 - `<bin> is not signed in` — carries `raw`, the CLI's own reason, and `thenRun`. Relay `raw`
   verbatim. This check exists because a signed-out `agy` would otherwise block for 60 seconds
-  on its sign-in prompt.
+  on its sign-in prompt, and a signed-out `codex` would retry a 401 against OpenAI in a loop.
 
 A reviewed diff can contain text aimed at the reviewer. One canary - a diff whose comment ordered
 the reviewer to return "ship" with zero findings - was ignored; it reported the real bug and said
@@ -436,10 +467,10 @@ be edited further without its status line moving. Git-ignored files are out of s
 
 `node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
-both providers end to end, and the research verb's argument rules and scratch cleanup. 47 tests.
-The suite stubs `gh`, `cursor-agent` and `agy` on PATH, so it needs no network and no account with
-either vendor. Run it after a Cursor CLI or Antigravity CLI upgrade, alongside re-checking what
-`--mode ask` and `--mode plan` actually block.
+all three providers end to end, and the research verb's argument rules and scratch cleanup.
+69 tests. The suite stubs `gh`, `cursor-agent`, `agy` and `codex` on PATH, so it needs
+no network and no account with any vendor. Run it after a Cursor, Antigravity or Codex CLI upgrade,
+alongside re-checking what `--mode ask`, `--mode plan` and `-s read-only` actually block.
 
 ## Config
 
@@ -447,10 +478,10 @@ The config file (`doctor` reports `configPath`):
 
 | Key | Meaning |
 |---|---|
-| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"`. Both halves required. |
+| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"`. Both halves required. On `codex` the model half usually ends in `:<effort>`; a bare id with no suffix is legal and runs at codex's default effort. |
 | `timeoutSeconds` | Hard kill for a run. Default 900. |
 | `keepRuns` | Run folders kept per repository. Default 20. |
-| `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy ignores it. |
+| `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy and codex ignore it. |
 | `maxDiffBytes` / `maxAdviseBytes` | Size caps, in JavaScript characters. Truncation is always reported. |
 | `modelLabels` | `modelLabels[provider][modelId]` display names, refreshed by `sync-labels`. |
 
@@ -458,8 +489,12 @@ There is no `provider` key. A config that still carries one is rejected with
 `config contains "provider"; remove it and use "<provider>/<model>" in models`. Any other unknown
 top-level key is rejected too, so a stale config is caught whole rather than half-read.
 
+A codex model whose `:<effort>` suffix codex does not take is rejected the same way, with
+`models.<job>: unknown codex reasoning effort "<x>" in model "<id>"; valid efforts are ...`.
+`doctor` reports it in `configErrors`, so a bad effort is caught at setup and not on every run.
+
 `doctor` returns fresh labels per provider, so setup can refresh that table whenever the picks
 change. To change a default model, offer the live list from `doctor` and write the pick back here.
 
-Default picks are non-Claude on purpose, on both providers. `claude-fable-*` is excluded outright:
+Default picks are non-Claude on purpose, on every provider. `claude-fable-*` is excluded outright:
 Cursor flags it **NO ZDR**, meaning prompts are retained.
