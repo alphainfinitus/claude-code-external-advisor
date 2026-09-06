@@ -31,7 +31,7 @@ defect found by running the skill on itself; keep that one-guard-per-test shape.
 
 ## Architecture
 
-Three artifacts must stay in sync when behaviour changes:
+Four artifacts must stay in sync when behaviour changes:
 
 - `skill/SKILL.md` documents the verbs, flags, JSON envelope fields, and the terminal status-line
   format Claude is told to use. It's what the model reads at runtime, so a flag or envelope key
@@ -41,6 +41,12 @@ Three artifacts must stay in sync when behaviour changes:
   packet, and calls `invoke()`.
 - `skill/prompts/<verb>.md` are loaded by name via `readPrompt(verb)` and prepended to the packet.
   Renaming a verb means renaming its prompt file.
+- `skill/references/*.md` hold procedure too long to keep resident. `setup.md` is the seven-step
+  first-run and model-change flow, moved out because it runs once but was loading on every run.
+  Nothing in the code reads these: unlike `prompts/`, they arrive only if the model follows the
+  pointer in SKILL.md, so anything that must hold on every run stays in SKILL.md itself. That is
+  why the lineage rule and the `claude-fable-*` exclusion sit next to the pointer rather than
+  inside `setup.md`, and why `advise`'s privacy note is stated in SKILL.md and not just linked.
 
 **`invoke()` is the shared core.** Every model-facing verb goes through it: write `packet.md` into
 a fresh run directory, fingerprint the tree, spawn the provider with a one-line prompt pointing at
@@ -71,7 +77,7 @@ format. Each entry carries `bin`, `installHint`, `loginHint`, `readOnly` (the fl
 run read-only), `readOnlyStrength` (`"dispatch"` when the CLI refuses the tool call, `"prompt"`
 when the model is merely told), `buildArgs`, `listModels` (which doubles as the auth probe), and
 `parse`, plus `webAccess` (`full` or `restricted`) and `webNote`, the measured web reach that only
-`doctorReport` surfaces, for SKILL.md's setup step to read when a model is picked. No run path
+`doctorReport` surfaces, for `references/setup.md` step 5 to read when a model is picked. No run path
 checks them, so a one-off `research --model cursor/<id>` gets no `restricted` warning anywhere.
 Two are optional: `verifySession(requested, returned)` and
 `warnings(run)`. `parse` returns the normalized `{ok, text, sessionId, usage, error}` or `null`,
