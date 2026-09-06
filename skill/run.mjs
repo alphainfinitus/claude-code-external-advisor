@@ -3,8 +3,8 @@
  * external-advisor runner.
  *
  * Invokes an external CLI coding agent in its read-only mode and returns a normalized JSON
- * envelope on stdout. Provider-specific argv lives in PROVIDERS so a
- * second CLI (codex, gemini) can be added without touching run/guard/persistence logic.
+ * envelope on stdout. Provider-specific argv lives in PROVIDERS so another
+ * CLI (gemini, say) can be added without touching run/guard/persistence logic.
  *
  * Usage:
  *   node run.mjs review  [--repo P] [--pr N] [--base REF] [--task STR] [--model M] [--timeout S]
@@ -48,6 +48,43 @@ const DEFAULT_CONFIG = {
 };
 
 /**
+ * The reasoning tiers codex offered on 2026-09-06, as a snapshot. `doctor` reads the live
+ * catalogue, so if codex adds a tier, doctor will offer it and this will refuse it - loudly,
+ * which is the safe direction. Extend this list when that happens.
+ */
+const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+
+/**
+ * Splits a codex model id into `{id, effort, error}`. A codex model half may carry a trailing
+ * `:<effort>`, e.g. gpt-5.6-terra:xhigh, because codex takes the reasoning level as a config
+ * override rather than a flag. Split on the LAST colon so a slug containing one keeps it.
+ *
+ * An unrecognised suffix comes back as `error` rather than being sent: an unknown value does not
+ * fail codex, it warns and answers on a fallback model, which reads as a confident answer from a
+ * model nobody picked.
+ *
+ * One helper, two callers - codex's `validateModel` and its `buildArgs` - so the parsing rule
+ * lives in one place. `validateModel` is what runs first; `buildArgs` is defence in depth.
+ */
+function splitCodexEffort(model) {
+  const raw = model || '';
+  const cut = raw.lastIndexOf(':');
+  // `> 0`, not `>= 0`: an id that is nothing but a suffix (":xhigh") skips the split and reaches
+  // codex whole as -m, which fails closed on an error item. `>= 0` would strip it to an empty id,
+  // drop -m, and silently answer on codex's own default model.
+  if (cut <= 0) return { id: raw, effort: '', error: null };
+  const suffix = raw.slice(cut + 1);
+  if (!CODEX_EFFORTS.includes(suffix)) {
+    return {
+      id: raw,
+      effort: '',
+      error: `unknown codex reasoning effort "${suffix}" in model "${raw}"; valid efforts are ${CODEX_EFFORTS.join(', ')}`,
+    };
+  }
+  return { id: raw.slice(0, cut), effort: suffix, error: null };
+}
+
+/**
  * Provider adapters. This table is the only place that knows a CLI's flags or output format.
  * `buildArgs` must produce a read-only invocation, and it returns the FULL argv including the
  * prompt, because the CLIs disagree about where the prompt goes. `readOnlyStrength` says how
@@ -60,6 +97,11 @@ const DEFAULT_CONFIG = {
  * configured with and setup has to say what that CLI can reach before someone picks it.
  * `parse` returns the normalized {ok, text, sessionId, usage, error}, so nothing downstream knows
  * which CLI ran.
+ * Four hooks are optional. `validateModel(model)` returns a user-facing error string, or null,
+ * for a model id this CLI cannot run; it is checked before any run directory exists.
+ * `auth(run)` returns {ok, raw} for CLIs that can answer "signed in?" more cheaply than
+ * listModels; a provider without one uses listModels as its probe.
+ * `verifySession(requested, returned)` and `warnings(run)` are the other two.
  */
 const PROVIDERS = {
   cursor: {
@@ -216,6 +258,152 @@ const PROVIDERS = {
       return null;
     },
   },
+  codex: {
+    bin: 'codex',
+    installHint: 'brew install codex   (or: npm install -g @openai/codex)',
+    loginHint: 'codex login  (opens a browser; the user must run this themselves)',
+    readOnly: '-s read-only',
+    // Stronger than cursor's, which only refuses at tool dispatch: on codex-cli 0.153.4, measured
+    // 2026-09-06, `-s read-only` is an OS sandbox AND a tool-router refusal. apply_patch came back
+    // "patch rejected: writing is blocked by read-only sandbox" and a shell `echo hi > FILE` came
+    // back "operation not permitted" from Seatbelt. Neither route created a file. The enum has no
+    // value above "dispatch", so that is what this records.
+    readOnlyStrength: 'dispatch',
+    webAccess: 'full',
+    webNote:
+      'The native web__run tool is on by default and did both a web search and a fetch of https://example.com under -s read-only, measured on codex-cli 0.153.4 on 2026-09-06. Whether a plain shell curl has network under read-only was not measured.',
+    // Refuses a bad reasoning suffix before invoke() writes anything. buildArgs checks it again,
+    // but that runs after the packet is on disk.
+    validateModel(model) {
+      return splitCodexEffort(model).error;
+    },
+    buildArgs({ model, workspace, resume, prompt }) {
+      // Defence in depth: validateModel already refused this, at a point where nothing had been
+      // written yet. Reaching fail() here means a caller skipped the pre-flight check.
+      const { id, effort, error } = splitCodexEffort(model);
+      if (error) fail(error);
+      // codex parses a `-c` value as TOML, so the inner double quotes are the string delimiters
+      // it strips, not data. Node spawns no shell to add them, so they have to sit inside the
+      // single argv element. A future override wanting a number or a bool must go unquoted.
+      const reasoning = effort ? ['-c', `model_reasoning_effort="${effort}"`] : [];
+      // `exec resume` rejects -s, -C and --add-dir, so the sandbox has to ride on -c there. The
+      // flags below are ones it does take - --json, --all, --ignore-user-config and
+      // --skip-git-repo-check every time, and -m only when the caller named a model, because a
+      // plain resume keeps the session's own. Read `codex exec resume --help` before deleting one.
+      // Verified from that --help and empirically on codex-cli 0.153.4, 2026-09-06.
+      // Read-only does survive a resume on its own (verified on 0.153.4); this re-sends it anyway.
+      // --all is what finds a thread started from a different cwd, and `review --pr` deletes its
+      // worktree, so a later resume never runs from the directory the thread began in.
+      // --ignore-user-config stops the user's own MCP servers from spawning; it is not accepted by
+      // `login status` or `debug models`. --skip-git-repo-check is belt and braces: every
+      // workspace here is already a repository - invoke() refuses to run outside one, preparePr()
+      // checks out a worktree, `research --scratch` does git init plus one empty commit - but a
+      // linked worktree carries `.git` as a FILE rather than a directory, and whether codex's repo
+      // check accepts that was never measured.
+      const a = resume
+        ? ['exec', 'resume', resume, '--all', '--json', '--ignore-user-config', '-c', 'sandbox_mode="read-only"']
+        : ['exec', '--json', '-s', 'read-only', '--ignore-user-config'];
+      a.push('--skip-git-repo-check');
+      // Workspace is codex's cwd anyway; -C states it so a later change of spawn cwd cannot move
+      // the run. addDir is deliberately ignored: on codex --add-dir means "additionally WRITABLE",
+      // the opposite of what cursor and agy use it for, and it is not needed either, because codex
+      // reads outside its cwd freely. The `sandbox` config flag is ignored too, the way agy ignores it.
+      if (!resume && workspace) a.push('-C', workspace);
+      if (id) a.push('-m', id);
+      a.push(...reasoning);
+      // codex exec takes the prompt as the last positional argument.
+      if (prompt) a.push(prompt);
+      return a;
+    },
+    // `login status` exits 0 signed in, 1 signed out. About a second, no model turn, no catalogue
+    // request - which is why codex defines this hook at all: a run only needs the yes/no, and
+    // listModels would fetch a quarter of a megabyte to answer it. It matters that the run asks:
+    // a signed-out `codex exec` retries 401 against wss://api.openai.com in a loop instead of
+    // exiting. Does not accept --ignore-user-config.
+    async auth(run) {
+      const res = await run(['login', 'status']);
+      return { ok: res.code === 0, raw: (res.stdout || res.stderr).trim() };
+    },
+    // Two calls, because `debug models` cannot be the auth probe: signed out it still exits 0 and
+    // returns a different bundled catalogue, so it would report a list of models nobody can run.
+    // The probe is the same `auth` hook a run uses, not a second copy of it. `doctor` and the
+    // `models` verb call listModels directly and rely on it probing. Neither subcommand accepts
+    // --ignore-user-config.
+    async listModels(run) {
+      const signedIn = await this.auth(run);
+      if (!signedIn.ok) return { ok: false, models: [], raw: signedIn.raw };
+      const res = await run(['debug', 'models']);
+      if (res.code !== 0) return { ok: false, models: [], raw: (res.stdout || res.stderr).trim() };
+      let doc;
+      try {
+        doc = JSON.parse(res.stdout);
+      } catch {
+        return { ok: false, models: [], raw: res.stdout.trim() };
+      }
+      const models = [];
+      for (const m of (doc && doc.models) || []) {
+        if (!m || !m.slug || m.visibility === 'hide') continue;
+        const label = m.display_name || m.slug;
+        const levels = (m.supported_reasoning_levels || []).map((l) => l && l.effort).filter(Boolean);
+        // One id per model x effort, and never the bare slug: a bare id runs at codex's own
+        // default effort, so setup could offer "the model you asked for" at a level nobody chose.
+        // A model that lists no levels has nothing to choose, so it keeps its bare slug.
+        if (!levels.length) models.push([m.slug, label]);
+        else for (const e of levels) models.push([`${m.slug}:${e}`, `${label} (${e})`]);
+      }
+      // `raw` is summarised, not verbatim: each catalogue entry carries the model's full system
+      // prompt, so the real stdout is a quarter of a megabyte. The other two providers print a
+      // line per model, and `raw` on success is only ever read by a human, so match them.
+      const raw = models.map(([id, label]) => `${id}\t${label}`).join('\n');
+      return { ok: true, models, raw };
+    },
+    // --json prints one JSON event per line. Unparseable lines are skipped, as with the other two.
+    parse(stdout) {
+      let sawObject = false;
+      let sessionId = null;
+      let usage = null;
+      let error = null;
+      const texts = [];
+      for (const line of stdout.split('\n')) {
+        let o;
+        try {
+          o = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!o || typeof o !== 'object') continue;
+        sawObject = true;
+        if (o.type === 'thread.started' && o.thread_id) sessionId = o.thread_id;
+        else if (o.type === 'turn.completed' && o.usage) usage = o.usage;
+        else if (o.type === 'item.completed' && o.item) {
+          // Every agent_message, not the last one: codex emits a short commentary preamble and
+          // the real answer as two separate items, and keeping only the last drops the half the
+          // final message refers back to. Only messages that carry text count: an empty one is
+          // not an answer, and counting it would let a renamed `text` field return ok with an
+          // empty result - a silent non-answer, worse than the failure below.
+          if (o.item.type === 'agent_message') {
+            const text = String(o.item.text || '');
+            if (text.trim()) texts.push(text);
+          }
+          // An unknown model id does not fail codex: it reports it here and answers on a fallback
+          // model. That is a silently substituted model wearing a plausible answer, so it fails
+          // the run even when an answer did arrive.
+          else if (o.item.type === 'error' && !error) error = String(o.item.message || 'codex reported an error');
+        }
+      }
+      if (!sawObject) return null;
+      // No turn.failed event was ever observed, so a failure shape we have not seen would read as
+      // a successful empty answer. Absence of an answer is the failure.
+      if (!error && !texts.length) error = 'codex produced no agent_message with text; the turn did not answer';
+      return { ok: !error, text: texts.join('\n\n'), sessionId, usage, error };
+    },
+    // An unknown resume id exits 1 today rather than starting a fresh thread, and the returned
+    // thread_id equals the requested one. This costs one comparison and is what would catch the
+    // release that changes that, which is exactly how agy loses a conversation.
+    verifySession(requested, returned) {
+      return returned === requested;
+    },
+  },
 };
 
 /**
@@ -268,7 +456,19 @@ function configErrors(cfg) {
       continue;
     }
     const provider = value.slice(0, value.indexOf('/'));
-    if (!Object.hasOwn(PROVIDERS, provider)) errs.push(`unknown provider "${provider}" in models.${job}`);
+    if (!Object.hasOwn(PROVIDERS, provider)) {
+      errs.push(`unknown provider "${provider}" in models.${job}`);
+      continue;
+    }
+    // Asked here so `doctor` reports a model the CLI cannot run, instead of blessing a config that
+    // then fails on every single run. Only some providers can judge a model id offline.
+    const p = PROVIDERS[provider];
+    if (p.validateModel) {
+      // The job name goes in FRONT: these messages end in a list of valid values, and a trailing
+      // "in models.review" reads as the last item of it.
+      const bad = p.validateModel(value.slice(value.indexOf('/') + 1));
+      if (bad) errs.push(`models.${job}: ${bad}`);
+    }
   }
   return errs;
 }
@@ -854,11 +1054,21 @@ async function invoke({ cfg, verb, repo, workspace, provider, model, packetBody,
 
   // Pre-flight, before anything is written or spawned. Without it a missing binary surfaces as
   // `spawn ENOENT` with no way to fix it, and a signed-out agy blocks for 60 seconds on the
-  // sign-in prompt. listModels is the auth probe: one extra spawn, no model turn, about a second.
+  // sign-in prompt.
+  // The model check is first because it costs nothing: no spawn, no network. It has to run before
+  // the run directory exists, or a refused model leaves an orphan packet.md with no meta.json -
+  // and being the newest, that orphan survives pruning and evicts the history `resume` reads.
+  // On `advise` that packet holds the whole distilled session transcript.
+  if (p.validateModel && model) {
+    const bad = p.validateModel(model);
+    if (bad) fail(bad);
+  }
   if (!whichBin(p.bin)) {
     fail(`${p.bin} not found on PATH`, { installHint: p.installHint, thenRun: p.loginHint });
   }
-  const probe = await p.listModels(providerRunner(p, ws));
+  // The auth probe: one extra spawn, no model turn, about a second. A provider with an `auth` hook
+  // has a cheaper way to ask than its listModels, which on codex fetches the whole catalogue.
+  const probe = p.auth ? await p.auth(providerRunner(p, ws)) : await p.listModels(providerRunner(p, ws));
   if (!probe.ok) {
     fail(`${p.bin} is not signed in`, { raw: String(probe.raw || '').slice(0, 1000), thenRun: p.loginHint });
   }

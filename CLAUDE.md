@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Claude Code skill (`skill/`) that shells out to a second coding-agent CLI to get a second opinion
-from a non-Claude model. Two are supported: the Cursor CLI (`cursor-agent`, `--mode ask`) and the
-Google Antigravity CLI (`agy`, `--mode plan`). Each job (`review`, `advise`, `consult`, `research`) picks its
-own provider and model. `README.md` covers the user-facing story (modes, privacy, config keys);
+from a non-Claude model. Three are supported: the Cursor CLI (`cursor-agent`, `--mode ask`), the
+Google Antigravity CLI (`agy`, `--mode plan`) and the OpenAI Codex CLI (`codex`, `-s read-only`).
+Each job (`review`, `advise`, `consult`, `research`) picks its own provider and model.
+`README.md` covers the user-facing story (modes, privacy, config keys);
 `skill/SKILL.md` is the runtime instruction doc Claude follows when the skill is invoked. Don't
 duplicate either here.
 
@@ -16,18 +17,19 @@ duplicate either here.
 No build, no lint, no dependencies. The runner is stdlib-only Node (ESM, `.mjs`).
 
 ```bash
-node --test skill/run.test.mjs                                   # full suite (~16s, 47 tests)
+node --test skill/run.test.mjs                                   # full suite (~25s, 65 tests)
 node --test --test-name-pattern "write guard" skill/run.test.mjs # one describe/it by name
 node skill/run.mjs doctor                                        # health check: binary, auth, live model list, resolved paths
 ./install.sh                                                     # copy skill/ to ~/.claude/skills/external-advisor/
 ```
 
-The tests stub `gh`, `cursor-agent` and `agy` as shell scripts on PATH and point
-`EXTERNAL_ADVISOR_HOME` at a temp dir, so they need no network and no account with either vendor.
+The tests stub `gh`, `cursor-agent`, `agy` and `codex` as shell scripts on PATH and point
+`EXTERNAL_ADVISOR_HOME` at a temp dir, so they need no network and no account with any vendor.
 New tests must follow that pattern (`stubBin` / `runCli` / `writeConfig` helpers). Any test that
-runs `doctor` must stub **every** provider binary: doctor probes all of `PROVIDERS`, so an
-unstubbed one reaches a real CLI on the developer's machine. Each existing test pins a specific
-defect found by running the skill on itself; keep that one-guard-per-test shape.
+runs `doctor` must stub **every** provider binary — all three of `cursor-agent`, `agy` and `codex`
+today: doctor probes all of `PROVIDERS`, so an unstubbed one reaches a real CLI on the developer's
+machine. Each existing test pins a specific defect found by running the skill on itself; keep that
+one-guard-per-test shape.
 
 ## Architecture
 
@@ -57,9 +59,22 @@ that's a throwaway worktree under the system temp dir (`preparePr`), fingerprint
 removed on every exit path including failure and SIGINT.
 
 **Read-only is layered, not guaranteed, and the layers differ per provider.** `readOnlyStrength`
-records which: cursor's `--mode ask` refuses writes at tool dispatch; agy's `--mode plan` only
-instructs the model, does not survive a resume, and so is sent on every call. On top of that sit
-the `sandbox` config flag (cursor only; agy's own `--sandbox` restricts nothing relevant) and the
+records which:
+
+- cursor's `--mode ask` refuses writes at tool dispatch.
+- agy's `--mode plan` only instructs the model. It does not survive a resume, so it is sent on
+  every call.
+- codex's `-s read-only` is the strongest. Two write routes were tried and each was blocked by a
+  different layer: the patch tool at the tool router, a shell redirect at the OS sandbox
+  (Seatbelt). Measured on codex-cli 0.153.4 on 2026-09-06. No single write was seen blocked by
+  both.
+
+Codex's resume path is the one mechanic worth knowing: `codex exec resume` accepts no `-s`, so the
+sandbox rides on `-c sandbox_mode="read-only"` there. That is re-sent even though the guard was
+measured to survive a resume on its own.
+
+On top of all that sit the `sandbox` config flag (cursor only; agy's `--sandbox` restricts nothing
+relevant, and codex needs no config flag because `-s read-only` is already its sandbox) and the
 before/after `treeFingerprint` (status list + tracked diff + size/mtime of untracked files). A
 fingerprint mismatch marks the run failed even if the model answered. Re-verify what each mode
 blocks after a CLI upgrade.
@@ -75,14 +90,27 @@ model id.
 **`PROVIDERS` is the extension point.** It is the only place that knows a CLI's flags or output
 format. Each entry carries `bin`, `installHint`, `loginHint`, `readOnly` (the flag that makes the
 run read-only), `readOnlyStrength` (`"dispatch"` when the CLI refuses the tool call, `"prompt"`
-when the model is merely told), `buildArgs`, `listModels` (which doubles as the auth probe), and
+when the model is merely told), `buildArgs`, `listModels` (which doubles as the auth probe unless
+the entry defines `auth`), and
 `parse`, plus `webAccess` (`full` or `restricted`) and `webNote`, the measured web reach that only
 `doctorReport` surfaces, for `references/setup.md` step 5 to read when a model is picked. No run path
 checks them, so a one-off `research --model cursor/<id>` gets no `restricted` warning anywhere.
-Two are optional: `verifySession(requested, returned)` and
-`warnings(run)`. `parse` returns the normalized `{ok, text, sessionId, usage, error}` or `null`,
-and `invoke()` reads nothing else, so adding a CLI (codex, gemini) touches no run, guard or
-persistence logic. `buildArgs` must produce a read-only invocation.
+Four are optional:
+
+- `validateModel(model)` — an error string for a model id this CLI cannot run, or null. Checked by
+  `configErrors()` and again by `invoke()` before the run directory exists.
+- `auth(run)` — `{ok, raw}` from a cheap sign-in probe, for a CLI whose `listModels` is expensive.
+  `invoke()` prefers it; a provider without one is probed with `listModels`.
+- `verifySession(requested, returned)`
+- `warnings(run)`
+
+`parse` returns the normalized `{ok, text, sessionId, usage, error}` or `null`,
+and `invoke()` reads nothing else, so adding a CLI (gemini, say) touches no run, guard or
+persistence logic. `buildArgs` must produce a read-only invocation. codex was added exactly that
+way: its whole diff is one `PROVIDERS` entry plus two optional hooks. The `:<effort>` suffix a
+codex model id may carry is parsed by `splitCodexEffort()`, the one helper behind both codex's
+`validateModel` and its `buildArgs` — `splitModel()` still passes a colon straight through, and
+`configErrors()` reaches the suffix only through `validateModel`.
 
 **`advise` locates the transcript itself** via `CLAUDE_CODE_SESSION_ID` and
 `~/.claude/projects/<repo-path-slug>/<sid>.jsonl`, then distils it (`distillTranscript`). It cannot
@@ -90,10 +118,11 @@ tell when it is running inside a subagent, which is why SKILL.md insists on `--c
 
 ## Constraints to preserve
 
-- Default and offered models are non-Claude on purpose, on both providers. agy's catalogue
+- Default and offered models are non-Claude on purpose, on all three providers. agy's catalogue
   includes `claude-sonnet-4-6` and `claude-opus-4-6-thinking`, so the lineage rule (avoid `claude-*`
-  for `review` and `consult`) applies there too. Never offer `claude-fable-*` (Cursor flags it
-  NO ZDR); that note is Cursor-only.
+  for `review` and `consult`) applies there too. codex's catalogue carried no `claude-*` model when
+  it was checked on 2026-09-06, so the rule had nothing to bite on there; that is one snapshot, not
+  a guarantee. Never offer `claude-fable-*` (Cursor flags it NO ZDR); that note is Cursor-only.
 - Nothing but the packet path goes on the provider command line. Diffs, questions, and transcripts
   go into `packet.md`.
 - Truncation (diff or transcript over the configured byte cap) is always reported in the packet,
