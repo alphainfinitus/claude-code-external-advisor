@@ -376,6 +376,23 @@ function isRepo(repo) {
 }
 
 /**
+ * True only when git ran and reported that this path is not a work tree. `!isRepo()` cannot tell
+ * that apart from git failing to run at all - an unparseable global git config makes both false -
+ * and telling someone their directory is wrong would bury git's own reason for the failure. The
+ * `--version` probe answers in any directory and needs no repository, so it fails only when git
+ * itself cannot start.
+ */
+function isNotRepo(repo) {
+  if (isRepo(repo)) return false;
+  try {
+    gitStrict(repo, ['--version']);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Content fingerprint of the working tree, used to detect writes during a run.
  * Covers the status list, the tracked diff, and size+mtime of untracked files - porcelain
  * output alone reports only status codes and paths, so an already-dirty or already-untracked
@@ -627,6 +644,28 @@ function distillTranscript(path, maxBytes) {
 }
 
 /**
+ * The parent directory for this user's throwaway checkouts under the system temp dir. The uid is
+ * in the name because on Linux tmpdir() is /tmp, shared by everyone on the machine: the first user
+ * to run created the parent with their own umask and owned it, cleanup() only ever removes the
+ * leaf inside it, and every later user then got EACCES from mkdir and a dead run. macOS never hit
+ * it because its tmpdir() is already per-user. The name still starts with external-advisor, so
+ * whoever finds one of these in /tmp can tell what wrote it. process.getuid is not defined on
+ * Windows, where the temp dir is per-user anyway.
+ */
+function tmpRoot(name) {
+  const uid = typeof process.getuid === 'function' ? `-${process.getuid()}` : '';
+  return join(tmpdir(), `${name}${uid}`);
+}
+
+/**
+ * Exit codes for the signals that must still run cleanup: 128 plus the signal number. SIGHUP is
+ * in the table because Node's default action for it is to terminate without firing 'exit', so
+ * closing a terminal tab or dropping an SSH session mid-run orphaned the PR worktree or the
+ * scratch workspace in the temp dir with nothing left to remove it.
+ */
+const SIGNAL_EXITS = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
+
+/**
  * Checks out a PR head in a throwaway worktree so the reviewer reads the PR's real code, not the
  * local checkout. Uses a private ref namespace and a detached worktree, so no branch is created
  * and the caller's working tree is never touched; cleanup() removes both.
@@ -654,7 +693,7 @@ function preparePr(repo, number) {
   const baseRef = `refs/external-advisor/base-${number}-${token}`;
   // Transient checkouts go to the system temp dir, never inside the repo: a full worktree under
   // .agent-artifacts/ is gitignored but still visible to file watchers, linters and test globs.
-  const worktree = join(tmpdir(), 'external-advisor-worktrees', `pr-${number}-${token}`);
+  const worktree = join(tmpRoot('external-advisor-worktrees'), `pr-${number}-${token}`);
   const cleanupRefs = () => {
     git(repo, ['update-ref', '-d', ref]);
     git(repo, ['update-ref', '-d', baseRef]);
@@ -698,10 +737,10 @@ function preparePr(repo, number) {
     git(repo, ['worktree', 'prune']);
   };
   process.on('exit', cleanup);
-  for (const sig of ['SIGINT', 'SIGTERM']) {
+  for (const [sig, code] of Object.entries(SIGNAL_EXITS)) {
     process.on(sig, () => {
       cleanup();
-      process.exit(sig === 'SIGINT' ? 130 : 143);
+      process.exit(code);
     });
   }
 
@@ -740,7 +779,7 @@ function preparePr(repo, number) {
  * failure silently. A HEAD keeps all three parts of the fingerprint real.
  */
 function prepareScratch() {
-  const dir = join(tmpdir(), 'external-advisor-scratch', `research-${runId()}`);
+  const dir = join(tmpRoot('external-advisor-scratch'), `research-${runId()}`);
 
   // Registered before the directory exists, and on 'exit' rather than only in a `finally`, so it
   // covers every path: signals, and a failure inside this function before it ever returns a
@@ -753,10 +792,10 @@ function prepareScratch() {
     rmSync(dir, { recursive: true, force: true });
   };
   process.on('exit', cleanup);
-  for (const sig of ['SIGINT', 'SIGTERM']) {
+  for (const [sig, code] of Object.entries(SIGNAL_EXITS)) {
     process.on(sig, () => {
       cleanup();
-      process.exit(sig === 'SIGINT' ? 130 : 143);
+      process.exit(code);
     });
   }
 
@@ -1276,6 +1315,14 @@ async function main() {
     // Resolved before the workspace is built: a missing models.research would otherwise create a
     // temp git repo and immediately delete it again.
     const picked = resolveModel(cfg, 'research', args.model);
+    // Checked here for the same reason resolveModel is: invoke() checks it too, but only after
+    // prepareScratch() has built a temp git repo and deleted it again for nothing, and its message
+    // is about a working-tree guard the user never asked for.
+    if (args.scratch && isNotRepo(repo)) {
+      fail(
+        `${repo} is not a git repository, and even --scratch has to be run from inside one. The throwaway workspace is all the model reads, but the repository is still where this run is filed in the history and what the write guard checks afterwards.`,
+      );
+    }
     // --scratch is for questions that are not about this code. The repo stays the run's durable
     // identity - history bucket and write guard - while the model only ever sees the temp dir.
     const scratch = args.scratch ? prepareScratch() : null;

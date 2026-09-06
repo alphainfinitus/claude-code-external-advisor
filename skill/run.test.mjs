@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -136,13 +136,12 @@ function agyStub({ argvLog = '', conversationId = 'agy-conv-1', signedOut = fals
 const CURSOR_MODELS = { models: { review: 'cursor/m1', advise: 'cursor/m1', consult: 'cursor/m1' } };
 
 /**
- * Runs the CLI against an isolated state directory and returns its JSON envelope.
- * `omitBin` strips every PATH entry that holds that binary, so a test can prove the
- * not-installed branch even on a machine where the real CLI is installed. `env` adds variables for
- * the child alone - the object below is a fresh copy, so a value hostile to git cannot reach the
- * `git()` and `commit()` helpers, which run in this process.
+ * The child's environment, isolated from this process. `omitBin` strips every PATH entry that
+ * holds that binary, so a test can prove the not-installed branch even on a machine where the real
+ * CLI is installed. `env` adds variables for the child alone - the object below is a fresh copy,
+ * so a value hostile to git cannot reach the `git()` and `commit()` helpers, which run here.
  */
-function runCli(args, { home, bin, omitBin, env: extraEnv } = {}) {
+function childEnv({ home, bin, omitBin, env: extraEnv } = {}) {
   const env = { ...process.env, EXTERNAL_ADVISOR_HOME: home, ...extraEnv };
   let path = process.env.PATH || '';
   if (omitBin) {
@@ -152,18 +151,38 @@ function runCli(args, { home, bin, omitBin, env: extraEnv } = {}) {
       .join(':');
   }
   env.PATH = bin ? `${bin}:${path}` : path;
+  return env;
+}
+
+/** Runs the CLI against an isolated state directory and returns its JSON envelope. */
+function runCli(args, opts = {}) {
   try {
     return JSON.parse(
       execFileSync(process.execPath, [RUNNER, ...args], {
         cwd: SKILL_DIR,
         encoding: 'utf8',
-        env,
+        env: childEnv(opts),
         stdio: ['ignore', 'pipe', 'pipe'],
       }),
     );
   } catch (e) {
     // A failed run still prints its envelope on stdout before exiting non-zero.
     return JSON.parse(e.stdout || '{}');
+  }
+}
+
+/** Runs the CLI for its exit status alone: a run killed by a signal prints no envelope to parse. */
+function runStatus(args, opts = {}) {
+  try {
+    execFileSync(process.execPath, [RUNNER, ...args], {
+      cwd: SKILL_DIR,
+      encoding: 'utf8',
+      env: childEnv(opts),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return 0;
+  } catch (e) {
+    return e.status === null ? `killed by ${e.signal}` : e.status;
   }
 }
 
@@ -832,6 +851,71 @@ describe('research', () => {
 
     assert.equal(out.ok, true, out.error);
     assert.equal(out.scratch, true, 'the run must still have used a throwaway workspace');
+  });
+
+  it('refuses --scratch outside a repository before it builds anything', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const outside = tmp('nogit');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    // invoke() checks this too, but only after prepareScratch() has created a temp git repo and
+    // deleted it again, and it reports a working-tree guard the user never asked for.
+    const out = runCli(['research', '--repo', outside, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, false);
+    assert.match(out.error, /even --scratch has to be run from inside one/);
+    assert.equal(existsSync(log), false, 'the refusal must land before any workspace is built');
+  });
+
+  it('puts the scratch parent directory under this user alone', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('scratch-parent'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const log = join(tmp('argv'), 'argv.log');
+    const bin = stubBin({ 'cursor-agent': cursorStub({ argvLog: log }) });
+
+    // On Linux tmpdir() is /tmp, shared by every user. One shared parent meant the first user to
+    // run owned it and everyone after them got EACCES from mkdir. macOS never showed it, because
+    // its tmpdir() is already per-user.
+    const out = runCli(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    const ws = readFileSync(log, 'utf8').trim().split('\n').pop().match(/--workspace (\S+)/)[1];
+    assert.equal(
+      basename(dirname(ws)),
+      `external-advisor-scratch-${process.getuid()}`,
+      'the parent must be per-user and still name the skill that created it',
+    );
+  });
+
+  it('removes the scratch workspace when the terminal hangs up mid-run', () => {
+    const home = tmp('home');
+    writeConfig(home, { models: { research: 'cursor/m1' } });
+    const repo = initRepo(tmp('scratch-sighup'));
+    commit(repo, 'README.md', 'base\n', 'init');
+    const cwdLog = join(tmp('cwd'), 'cwd.log');
+    // SIGHUP had no handler, and Node's default for it is to terminate without running 'exit', so
+    // a closed terminal tab or a dropped SSH session left the workspace in the temp dir forever.
+    // The stub signals its parent - the runner - and then outlives it.
+    const bin = stubBin({
+      'cursor-agent': [
+        `case "$1" in`,
+        `  --list-models) printf 'm1 - M1 (current)\\n'; exit 0 ;;`,
+        `esac`,
+        `pwd >> "${cwdLog}"`,
+        `kill -HUP $PPID`,
+        `sleep 10`,
+      ].join('\n'),
+    });
+
+    const status = runStatus(['research', '--repo', repo, '--scratch', '--question', 'anything'], { home, bin });
+
+    const ws = readFileSync(cwdLog, 'utf8').trim().split('\n').pop();
+    assert.equal(existsSync(ws), false, 'a hangup must not orphan the throwaway workspace');
+    assert.equal(status, 129, 'a signal exit must be 128 + the signal number');
   });
 });
 

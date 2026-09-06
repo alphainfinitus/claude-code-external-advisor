@@ -350,6 +350,9 @@ use your own WebSearch: a run costs 30-150s, which is not worth paying to look u
   yours goes into the workspace. The directory is removed on every exit path.
 - Write `--scratch` on its own. It takes no value: `--scratch=true` and `--scratch false` are both
   refused, because guessing what a value means could hand over the repository.
+- **`--scratch` still has to be run from inside a git repository.** The throwaway directory is all
+  the model reads, but the repository is where the run is filed in the history, and it is what the
+  write guard checks. Outside one the run is refused before anything is created.
 - Without `--scratch` the repository is the workspace, so file-based questions work with no setup.
 - `treeChanged` on a scratch run means the repository moved **or** the throwaway directory did:
   both are fingerprinted, and the flag is the OR of the two. Check `git status` in the repository
