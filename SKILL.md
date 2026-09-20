@@ -74,25 +74,18 @@ default effort.
 
 ## Where the runner lives
 
-`run.mjs` sits next to this file. Commands below write it as `$SKILL/run.mjs` — substitute the
-skill's base directory, which is reported to you when this skill loads. Don't hardcode a path:
-this skill works from `~/.claude/skills/` and from a repo's `.agents/skills/` unchanged, and a
-hardcoded home path breaks the moment it's shared into a repo.
+Commands below use two placeholders:
 
-Per-user state lives **inside the skill directory**, next to `run.mjs`: `config.json` and `runs/`.
-Each installation carries its own, so a personal copy under `~/.claude/skills/` and a repo copy
-under `.agents/skills/` keep separate configs and histories. `EXTERNAL_ADVISOR_HOME` overrides the
-location, and `doctor` reports it as `stateRoot`.
+- `${CLAUDE_PLUGIN_ROOT}` — where this plugin is installed, holding `run.mjs`
+- `${CLAUDE_PLUGIN_DATA}` — this plugin's own state directory
 
-**A repo copy must gitignore that state** while keeping the skill's own files tracked:
+Claude Code replaces both with real absolute paths before you read this file. Use them exactly as
+written, **double quotes included**: a path may contain a space, and an unquoted command would
+split on it and fail.
 
-```gitignore
-<path-to-skill>/config.json
-<path-to-skill>/runs/
-```
-
-Being ignored is also what keeps run artifacts out of `git status --exclude-standard`, so they
-cannot trip the write guard.
+State — `config.json` and `runs/` — lives under `${CLAUDE_PLUGIN_DATA}`, outside any repository.
+Run artifacts therefore never reach `git status --exclude-standard` and cannot trip the write
+guard. `doctor` reports the resolved path as `stateRoot`.
 
 Transient PR worktrees go to the system temp directory rather than the repo: a full checkout inside
 the working tree is still picked up by file watchers, linters and test globs even when gitignored.
@@ -116,7 +109,7 @@ Model labels live in `modelLabels` in the config, keyed by **provider first, the
 `modelLabels[provider][model]` rather than inventing a name, and fall back to `provider/model` if
 the label isn't there. Every run's JSON envelope carries `provider` and `model`, so you can look
 the label up after the fact. If a model you're about to use has no label, run
-`node $SKILL/run.mjs sync-labels` - it caches display names for every model that is configured or
+`EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" sync-labels` - it caches display names for every model that is configured or
 has been used before, and drops ids a provider has retired. Never write all 200+ into the config;
 that turns it into 34KB nobody can read.
 
@@ -160,7 +153,7 @@ than either alone:
 ## advise — an external model critiques your work
 
 ```bash
-node $SKILL/run.mjs advise \
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" advise \
   --question "what have I got wrong here?"
 ```
 
@@ -234,7 +227,7 @@ it can be wrong about your work too.
 ## review — fresh eyes on a diff
 
 ```bash
-node $SKILL/run.mjs review --repo /path/to/repo \
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" review --repo /path/to/repo \
   --base staging --task "what this change is supposed to do"
 ```
 
@@ -262,7 +255,7 @@ Don't guess an id. Say which provider and model actually ran when you report bac
 from the usual one.
 
 ```bash
-node $SKILL/run.mjs review --repo . --pr 1234
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" review --repo . --pr 1234
 ```
 
 Run it more than once before treating a quiet result as clearance. Single runs vary; the
@@ -278,7 +271,7 @@ paying for it not to be. The agent reads the repo itself and picks up `AGENTS.md
 Write a briefing to a file, then:
 
 ```bash
-node $SKILL/run.mjs consult --repo /path/to/repo \
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" consult --repo /path/to/repo \
   --packet /tmp/packet.md
 ```
 
@@ -297,9 +290,9 @@ engages with nothing.
 ## research — look something up
 
 ```bash
-node $SKILL/run.mjs research --question "what changed in the Antigravity CLI in the last month"
-node $SKILL/run.mjs research --scratch --question "compare the four main Node rate limiters in 2026"
-node $SKILL/run.mjs research --packet /tmp/brief.md
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" research --question "what changed in the Antigravity CLI in the last month"
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" research --scratch --question "compare the four main Node rate limiters in 2026"
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" research --packet /tmp/brief.md
 ```
 
 Use it to move bulk reading off your own context: web lookups with real sources, or digesting a
@@ -371,7 +364,7 @@ path, and summarise the headlines in chat. Do not paste the whole report into th
 ## resume — push back on the answer
 
 ```bash
-node $SKILL/run.mjs resume --session <sessionId> \
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" resume --session <sessionId> \
   --message "You said X, but api/src/foo.ts:42 does Y. Which constraint breaks the tie?"
 ```
 
@@ -455,7 +448,7 @@ writing to the tree means something is wrong with the invocation. Say so loudly,
   was not touched, and that directory is deleted when the run ends, so there is nothing to inspect.
   The invocation is still broken - a read-only run wrote a file - so the answer is untrusted.
 
-Either way, run `node $SKILL/run.mjs doctor` and show `providers.<provider>.warnings` verbatim.
+Either way, run `EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" doctor` and show `providers.<provider>.warnings` verbatim.
 On `agy` the usual cause is `toolPermission: always-proceed`, which leaves plan mode - an
 instruction, not a refusal - as the only guard.
 
