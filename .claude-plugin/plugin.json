@@ -1,0 +1,12 @@
+{
+  "name": "external-advisor",
+  "description": "Get a second opinion from a non-Claude model through the Cursor, Antigravity or OpenAI Codex CLI, without leaving Claude Code.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Mridul Kumar"
+  },
+  "homepage": "https://github.com/alphainfinitus/claude-code-external-advisor",
+  "repository": "https://github.com/alphainfinitus/claude-code-external-advisor",
+  "license": "MIT",
+  "keywords": ["review", "second-opinion", "code-review", "research", "cursor", "codex", "gemini"]
+}
