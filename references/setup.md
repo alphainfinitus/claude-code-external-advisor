@@ -2,13 +2,14 @@
 
 The procedure `SKILL.md` sends you here for. Follow it in order; don't improvise from memory.
 
-`$SKILL` below means this skill's base directory, the one holding `run.mjs` — the same
-convention `SKILL.md` uses. It is reported to you when the skill loads. Never hardcode a path.
+Commands below use `${CLAUDE_PLUGIN_ROOT}` (where `run.mjs` lives) and `${CLAUDE_PLUGIN_DATA}`
+(this plugin's state directory). Claude Code fills both in before you read this file. Use them
+exactly as written, quotes included — an unquoted path containing a space would split and fail.
 
 Run this before the first use, and whenever the user wants a different model:
 
 ```bash
-node $SKILL/run.mjs doctor
+EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" doctor
 ```
 
 It returns JSON with `stateRoot`, `configPath`, `configExists`, `config`, `configErrors`, and a
@@ -90,5 +91,6 @@ interactively rather than making the user edit JSON:
    stops a read outside it.
 7. Write their picks into the config (`doctor` reports its exact path as `configPath`) as
    `"models": {"review": "<provider>/<model>", ...}`, then run
-   `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it working
+   `EXTERNAL_ADVISOR_HOME="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/run.mjs" sync-labels`,
+   then one small `review --base HEAD~1` so they see it working
    (a bare `review` on a clean tree has no diff and errors out).
