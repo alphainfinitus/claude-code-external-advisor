@@ -36,14 +36,24 @@ convincing.
 
 ## Install
 
-In Claude Code:
+First remove any copy installed the old way, as a skill:
+
+```bash
+rm -rf ~/.claude/skills/external-advisor
+```
+
+Skip that and the plugin installs but never runs. Claude Code drops a plugin's skill when a skill
+of the same name already sits under `~/.claude/skills/`, so the old copy keeps winning: you go on
+running the old code against the old state, and nothing anywhere tells you so.
+
+Then, in Claude Code:
 
 ```
 /plugin marketplace add alphainfinitus/claude-code-external-advisor
 /plugin install external-advisor@alphainfinitus
 ```
 
-Then install at least one provider CLI and sign in:
+Next, install at least one provider CLI and sign in:
 
 ```bash
 # Cursor
@@ -106,6 +116,10 @@ State lives in the plugin's own data directory, outside any repository:
 
 It holds `config.json` and `runs/`. It survives plugin updates, and is removed when you uninstall
 unless you pass `--keep-data`.
+
+State used to live in the install directory itself, `~/.claude/skills/external-advisor/`. If you
+have one there, copy its `config.json` into the directory above to keep your model picks. The run
+history can stay behind.
 
 Because it sits outside every repository, run artifacts do not appear in a project's `git status`
 or trip the write guard. (The exception is running `run.mjs` straight from a checkout of this repo
@@ -250,6 +264,11 @@ claude plugin validate . --strict
 ```
 
 Run `/reload-plugins` after editing to pick changes up without restarting.
+
+Work from `--plugin-dir`, not from a local-path install. A local-path install copies the working
+tree into the plugin cache verbatim, gitignored files included, so private notes and scratch
+directories are swept along with the code. `--plugin-dir` reads the directory in place and copies
+nothing. Installing from the GitHub source clones instead, so it is unaffected.
 
 A `--plugin-dir` checkout gets its own data directory (`external-advisor-inline`), separate from
 an installed copy. Your development runs and your real config do not share state.
