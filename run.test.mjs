@@ -592,6 +592,18 @@ describe('doctor and labels', () => {
     assert.equal(onDisk.modelLabels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
   });
 
+  it('creates its state directory when it does not exist yet', () => {
+    // A plugin data directory that has never been written to. sync-labels writes config.json
+    // with a bare writeFileSync, so without a mkdir it dies on ENOENT before producing output.
+    const home = join(tmp('home'), 'data', 'external-advisor');
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
+
+    const out = runCli(['sync-labels'], { home, bin });
+
+    assert.equal(out.ok, true);
+    assert.equal(existsSync(join(home, 'config.json')), true);
+  });
+
   it('reports each provider web reach so a research model can be picked knowingly', () => {
     const home = tmp('home');
     writeConfig(home, CURSOR_MODELS);

@@ -25,10 +25,12 @@ import { fileURLToPath } from 'node:url';
 
 const SKILL_DIR = dirname(fileURLToPath(import.meta.url));
 
-// State lives inside the skill directory, next to run.mjs: each installation of the skill carries
-// its own config and run history, whether that is ~/.claude/skills/ or a repo's .agents/skills/.
-// The repo copy must gitignore config.json and runs/ - being ignored is also what keeps run
-// artifacts out of `git status --exclude-standard`, so they cannot trip our own write guard.
+// State lives in the plugin's own data directory, handed to us as EXTERNAL_ADVISOR_HOME by
+// SKILL.md and references/setup.md, which read it from ${CLAUDE_PLUGIN_DATA}. That directory sits
+// outside any repository, so run artifacts never reach `git status --exclude-standard` and cannot
+// trip our own write guard. CLAUDE_PLUGIN_DATA is NOT readable here - Claude Code substitutes it
+// into skill text, it does not export it - so do not add an env fallback for it. Measured: a Bash
+// subprocess sees it unset even when that plugin's own skill triggered the call.
 let ROOT;
 let RUNS;
 let CONFIG_PATH;
@@ -37,6 +39,10 @@ function resolveRoots() {
   ROOT = process.env.EXTERNAL_ADVISOR_HOME || SKILL_DIR;
   RUNS = join(ROOT, 'runs');
   CONFIG_PATH = join(ROOT, 'config.json');
+  // Run directories are created with `recursive: true`, but `sync-labels` writes config.json with
+  // a bare writeFileSync. On a plugin data directory that has never been written to, that is an
+  // ENOENT before anything prints. Cheaper to guarantee the directory than to special-case it.
+  mkdirSync(ROOT, { recursive: true });
 }
 
 const DEFAULT_CONFIG = {
