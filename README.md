@@ -36,14 +36,14 @@ convincing.
 
 ## Install
 
-```bash
-git clone https://github.com/alphainfinitus/claude-code-external-advisor
-cd claude-code-external-advisor
-./install.sh
+In Claude Code:
+
+```
+/plugin marketplace add alphainfinitus/claude-code-external-advisor
+/plugin install external-advisor@alphainfinitus
 ```
 
-That copies `skill/` into `~/.claude/skills/external-advisor/`, then runs a health check and
-reports what each provider still needs:
+Then install at least one provider CLI and sign in:
 
 ```bash
 # Cursor
@@ -58,9 +58,8 @@ brew install codex          # or: npm install -g @openai/codex
 codex login
 ```
 
-To give it to a whole team instead, commit the same directory into your repo's `.agents/skills/`
-or `.claude/skills/`, and gitignore its `config.json` and `runs/` so everyone keeps their own
-model picks and history.
+To give it to a whole team, install it at project scope. That writes the plugin into the
+repository's `.claude/settings.json`, so it travels with the repo.
 
 ## Quick start
 
@@ -87,16 +86,20 @@ Naming a model in the request overrides the configured one for that run.
 
 ## Configuration
 
-State lives inside the skill directory, next to `run.mjs`: `config.json` and `runs/`. Each
-installation keeps its own, so a personal copy and a repo copy do not share configs. Set
-`EXTERNAL_ADVISOR_HOME` to override, and run `doctor` to see the resolved path.
+State lives in the plugin's own data directory, outside any repository:
 
-If you vendor the skill into a repo, gitignore its state while keeping its files tracked:
-
-```gitignore
-<path-to-skill>/config.json
-<path-to-skill>/runs/
 ```
+~/.claude/plugins/data/external-advisor-alphainfinitus/
+```
+
+It holds `config.json` and `runs/`. It survives plugin updates, and is removed when you uninstall
+unless you pass `--keep-data`.
+
+Because it sits outside every repository, run artifacts can never appear in a project's
+`git status` or trip the write guard.
+
+Set `EXTERNAL_ADVISOR_HOME` to override the location. Run `doctor` to see the resolved path,
+reported as `stateRoot`.
 
 The config file in that directory:
 
@@ -223,6 +226,19 @@ Packets and raw responses are written to the state directory's `runs/` and kept 
 - Web reach is a per-provider measurement recorded in `doctor`, not a guarantee. A `restricted`
   rating means that provider's reach was measured to be limited, and its `webNote` says how;
   Cursor's is an allow-list on URL fetch. Re-check after a CLI upgrade.
+
+## Developing
+
+```bash
+claude --plugin-dir .      # load this checkout as a plugin, no install
+node --test run.test.mjs   # the 70-test suite
+claude plugin validate . --strict
+```
+
+Run `/reload-plugins` after editing to pick changes up without restarting.
+
+A `--plugin-dir` checkout gets its own data directory (`external-advisor-inline`), separate from
+an installed copy. Your development runs and your real config do not share state.
 
 ## License
 

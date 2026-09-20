@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Claude Code skill (`skill/`) that shells out to a second coding-agent CLI to get a second opinion
+A Claude Code plugin (this repository) that shells out to a second coding-agent CLI to get a second opinion
 from a non-Claude model. Three are supported: the Cursor CLI (`cursor-agent`, `--mode ask`), the
 Google Antigravity CLI (`agy`, `--mode plan`) and the OpenAI Codex CLI (`codex`, `-s read-only`).
 Each job (`review`, `advise`, `consult`, `research`) picks its own provider and model.
 `README.md` covers the user-facing story (modes, privacy, config keys);
-`skill/SKILL.md` is the runtime instruction doc Claude follows when the skill is invoked. Don't
+`SKILL.md` is the runtime instruction doc Claude follows when the skill is invoked. Don't
 duplicate either here.
 
 ## Commands
@@ -17,10 +17,10 @@ duplicate either here.
 No build, no lint, no dependencies. The runner is stdlib-only Node (ESM, `.mjs`).
 
 ```bash
-node --test skill/run.test.mjs                                   # full suite (~25s, 69 tests)
-node --test --test-name-pattern "write guard" skill/run.test.mjs # one describe/it by name
-node skill/run.mjs doctor                                        # health check: binary, auth, live model list, resolved paths
-./install.sh                                                     # copy skill/ to ~/.claude/skills/external-advisor/
+node --test run.test.mjs                                         # full suite (~25s, 70 tests)
+node --test --test-name-pattern "write guard" run.test.mjs       # one describe/it by name
+node run.mjs doctor                                              # health check: binary, auth, live model list, resolved paths
+claude plugin validate . --strict                                # manifest check
 ```
 
 The tests stub `gh`, `cursor-agent`, `agy` and `codex` as shell scripts on PATH and point
@@ -35,20 +35,28 @@ one-guard-per-test shape.
 
 Four artifacts must stay in sync when behaviour changes:
 
-- `skill/SKILL.md` documents the verbs, flags, JSON envelope fields, and the terminal status-line
+- `SKILL.md` documents the verbs, flags, JSON envelope fields, and the terminal status-line
   format Claude is told to use. It's what the model reads at runtime, so a flag or envelope key
   that exists in the code but not here is effectively invisible.
-- `skill/run.mjs` implements them. Single file, no modules: `main()` dispatches on the verb
+- `run.mjs` implements them. Single file, no modules: `main()` dispatches on the verb
   (`review`, `consult`, `advise`, `research`, `resume`, `doctor`, `sync-labels`, `models`), builds a
   packet, and calls `invoke()`.
-- `skill/prompts/<verb>.md` are loaded by name via `readPrompt(verb)` and prepended to the packet.
+- `prompts/<verb>.md` are loaded by name via `readPrompt(verb)` and prepended to the packet.
   Renaming a verb means renaming its prompt file.
-- `skill/references/*.md` hold procedure too long to keep resident. `setup.md` is the seven-step
+- `references/*.md` hold procedure too long to keep resident. `setup.md` is the seven-step
   first-run and model-change flow, moved out because it runs once but was loading on every run.
   Nothing in the code reads these: unlike `prompts/`, they arrive only if the model follows the
   pointer in SKILL.md, so anything that must hold on every run stays in SKILL.md itself. That is
   why the lineage rule and the `claude-fable-*` exclusion sit next to the pointer rather than
   inside `setup.md`, and why `advise`'s privacy note is stated in SKILL.md and not just linked.
+
+**The repository is the plugin.** `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`
+sit at the root, and the marketplace entry is `"source": "./"`, so everything tracked here is
+copied into a user's plugin cache on install. The plugin name must stay `external-advisor`,
+matching the `name:` in `SKILL.md`'s frontmatter: when they match the short `/external-advisor`
+command resolves, and when they differ only `/external-advisor:external-advisor` does. Validate
+with `claude plugin validate . --strict` — the directory, not `.claude-plugin/plugin.json`, which
+raises a warning for this repo's own `CLAUDE.md`.
 
 **`invoke()` is the shared core.** Every model-facing verb goes through it: write `packet.md` into
 a fresh run directory, fingerprint the tree, spawn the provider with a one-line prompt pointing at
@@ -79,10 +87,16 @@ before/after `treeFingerprint` (status list + tracked diff + size/mtime of untra
 fingerprint mismatch marks the run failed even if the model answered. Re-verify what each mode
 blocks after a CLI upgrade.
 
-**State lives next to `run.mjs`**: `config.json` and `runs/<repo-slug>/<runId>-<verb>/`, overridable
-by `EXTERNAL_ADVISOR_HOME`. Both are gitignored, and that is load-bearing: ignored files are outside
-`git status --exclude-standard`, so writing run artifacts cannot trip the skill's own write guard.
-`sync-labels` is the only verb that writes config; it must never run concurrently with a run.
+**State lives in the plugin's data directory**: `config.json` and
+`runs/<repo-slug>/<runId>-<verb>/`, under `${CLAUDE_PLUGIN_DATA}`, which `SKILL.md` and
+`references/setup.md` pass in as `EXTERNAL_ADVISOR_HOME`. `run.mjs` cannot read
+`CLAUDE_PLUGIN_DATA` itself — Claude Code substitutes it into skill text rather than exporting it,
+measured unset in a Bash subprocess even when that plugin's own skill made the call — so never add
+an env fallback for it. That directory is outside every repository, which is what keeps run
+artifacts out of `git status --exclude-standard` and unable to trip the write guard. The
+`/config.json` and `/runs/` entries in `.gitignore` cover only the fallback case, where `run.mjs`
+is invoked bare from this checkout. `sync-labels` is the only verb that writes config; it must
+never run concurrently with a run.
 `models.<job>` is `"<provider>/<model>"`; there is no global `provider` key, and a config that
 still carries one is rejected rather than half-read. `modelLabels` is keyed by provider, then
 model id.
@@ -127,8 +141,6 @@ tell when it is running inside a subagent, which is why SKILL.md insists on `--c
   go into `packet.md`.
 - Truncation (diff or transcript over the configured byte cap) is always reported in the packet,
   never silent.
-- The skill must work unchanged from `~/.claude/skills/` and from a repo's `.agents/skills/` or
-  `.claude/skills/`, so nothing may hardcode a home path.
 - The lineage rule (avoid `claude-*`) stops at `research`, which judges nothing Claude wrote. The
   `claude-fable-*` exclusion does not stop there: it is about prompt retention, not lineage.
 - `webAccess` and `webNote` on a `PROVIDERS` entry are measurements, not policy. `research` runs on

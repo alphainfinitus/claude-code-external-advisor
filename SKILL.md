@@ -458,7 +458,7 @@ be edited further without its status line moving. Git-ignored files are out of s
 
 ## Tests
 
-`node --test <skill>/run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
+`node --test run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
 all three providers end to end, and the research verb's argument rules and scratch cleanup.
 69 tests. The suite stubs `gh`, `cursor-agent`, `agy` and `codex` on PATH, so it needs
