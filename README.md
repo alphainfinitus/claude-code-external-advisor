@@ -1,6 +1,6 @@
 # external-advisor
 
-A Claude Code skill that gets a second opinion from a different model, without leaving Claude Code.
+A Claude Code plugin that gets a second opinion from a different model, without leaving Claude Code.
 
 It shells out to the [Cursor CLI](https://cursor.com/docs/cli/overview), the
 [Antigravity CLI](https://antigravity.google/docs/cli) or the
@@ -95,8 +95,10 @@ State lives in the plugin's own data directory, outside any repository:
 It holds `config.json` and `runs/`. It survives plugin updates, and is removed when you uninstall
 unless you pass `--keep-data`.
 
-Because it sits outside every repository, run artifacts can never appear in a project's
-`git status` or trip the write guard.
+Because it sits outside every repository, run artifacts do not appear in a project's `git status`
+or trip the write guard. (The exception is running `run.mjs` straight from a checkout of this repo
+with no `EXTERNAL_ADVISOR_HOME` set — it then writes beside itself, which is why `/config.json`
+and `/runs/` are gitignored here.)
 
 Set `EXTERNAL_ADVISOR_HOME` to override the location. Run `doctor` to see the resolved path,
 reported as `stateRoot`.
