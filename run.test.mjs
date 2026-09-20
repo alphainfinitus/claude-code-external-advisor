@@ -5,7 +5,7 @@
  * No network and no account with any vendor: `gh`, `cursor-agent`, `agy` and `codex` are stub
  * executables placed on PATH, and every repository is a throwaway under the OS temp directory.
  *
- *   node --test skill/run.test.mjs
+ *   node --test run.test.mjs
  */
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
