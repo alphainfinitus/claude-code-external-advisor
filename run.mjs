@@ -36,13 +36,32 @@ let RUNS;
 let CONFIG_PATH;
 
 function resolveRoots() {
-  ROOT = process.env.EXTERNAL_ADVISOR_HOME || SKILL_DIR;
+  const given = process.env.EXTERNAL_ADVISOR_HOME;
+  // Set but empty is a typo, not a request for the default. SKILL.md passes the data directory
+  // through bash, and bash expands an unsubstituted ${CLAUDE_PLUGIN_DATA} to "". Falling back
+  // then would write config.json and runs/ into the plugin's install directory, which is
+  // version-scoped and replaced wholesale on the next update, so the model picks would vanish
+  // with no sign that anything went wrong. Unset is a different case and still falls back: that
+  // is what lets `node run.mjs` work from a checkout.
+  if (given !== undefined && given.trim() === '') {
+    fail(
+      'EXTERNAL_ADVISOR_HOME is set but empty. Set it to the plugin data directory, or unset it to use the directory run.mjs lives in.',
+    );
+  }
+  ROOT = given || SKILL_DIR;
   RUNS = join(ROOT, 'runs');
   CONFIG_PATH = join(ROOT, 'config.json');
   // Run directories are created with `recursive: true`, but `sync-labels` writes config.json with
   // a bare writeFileSync. On a plugin data directory that has never been written to, that is an
   // ENOENT before anything prints. Cheaper to guarantee the directory than to special-case it.
-  mkdirSync(ROOT, { recursive: true });
+  // A failure here is swallowed on purpose: this runs before verb dispatch, so throwing took
+  // doctor - the verb whose job is to explain a broken setup - down with the setup it was asked
+  // about. The verbs that really need to write still fail, from the write itself.
+  try {
+    mkdirSync(ROOT, { recursive: true });
+  } catch {
+    // Reported later by whatever tries to write, with the path it was actually writing.
+  }
 }
 
 const DEFAULT_CONFIG = {

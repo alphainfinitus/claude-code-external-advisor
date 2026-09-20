@@ -17,7 +17,7 @@ duplicate either here.
 No build, no lint, no dependencies. The runner is stdlib-only Node (ESM, `.mjs`).
 
 ```bash
-node --test run.test.mjs                                         # full suite (~25s, 70 tests)
+node --test run.test.mjs                                         # full suite (~25s, 72 tests)
 node --test --test-name-pattern "write guard" run.test.mjs       # one describe/it by name
 node run.mjs doctor                                              # health check: binary, auth, live model list, resolved paths
 claude plugin validate . --strict                                # manifest check

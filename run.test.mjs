@@ -550,6 +550,46 @@ describe('config resolution', () => {
   });
 });
 
+describe('state root', () => {
+  it('still answers doctor when the state directory cannot be created', () => {
+    // doctor's whole job is to diagnose a broken setup, so it is the one verb that has to survive
+    // one. Creating the state directory inside resolveRoots ran before verb dispatch, so an
+    // unwritable root aborted the process with a raw stack and left doctor unable to say why.
+    // /etc is not writable on macOS or on Linux CI.
+    const home = '/etc/nonexistent-state';
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.stateRoot, home);
+    assert.equal(out.configExists, false);
+    assert.equal(out.providers.cursor.authenticated, true);
+  });
+
+  it('refuses an EXTERNAL_ADVISOR_HOME that is set but empty, and still falls back when it is unset', () => {
+    // SKILL.md passes ${CLAUDE_PLUGIN_DATA} through bash, which expands an unsubstituted
+    // placeholder to "". `||` read that as unset and wrote config.json and runs/ into the
+    // plugin's install directory, which is version-scoped and replaced on the next update - so
+    // the model picks vanished silently. Unset is a different case and must keep falling back:
+    // that is what lets `node run.mjs` work from a checkout.
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
+
+    for (const home of ['', '   ']) {
+      const out = runCli(['doctor'], { home, bin });
+
+      assert.equal(out.ok, false, `EXTERNAL_ADVISOR_HOME="${home}" was accepted`);
+      assert.match(out.error, /EXTERNAL_ADVISOR_HOME/);
+      assert.match(out.error, /set but empty/);
+    }
+
+    const unset = runCli(['doctor'], { bin });
+
+    assert.equal(unset.ok, true, unset.error);
+    assert.equal(unset.stateRoot, SKILL_DIR);
+  });
+});
+
 describe('doctor and labels', () => {
   it('reports every provider, not only the configured one', () => {
     const home = tmp('home');
