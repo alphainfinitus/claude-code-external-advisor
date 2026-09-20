@@ -20,7 +20,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SKILL_DIR = dirname(fileURLToPath(import.meta.url));
@@ -46,6 +46,15 @@ function resolveRoots() {
   if (given !== undefined && given.trim() === '') {
     fail(
       'EXTERNAL_ADVISOR_HOME is set but empty. Set it to the plugin data directory, or unset it to use the directory run.mjs lives in.',
+    );
+  }
+  // A relative value resolves beneath the process working directory, so the same command run from
+  // two places silently uses two different states and `doctor` reports a stateRoot that cannot be
+  // resolved on its own. Calling resolve() here would keep that cwd-dependence and only hide it
+  // behind an absolute-looking path, so an ambiguous value is refused instead.
+  if (given !== undefined && !isAbsolute(given)) {
+    fail(
+      `EXTERNAL_ADVISOR_HOME must be an absolute path; got "${given}". A relative path would resolve against whatever directory you happen to run from.`,
     );
   }
   ROOT = given || SKILL_DIR;

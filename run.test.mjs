@@ -588,6 +588,33 @@ describe('state root', () => {
     assert.equal(unset.ok, true, unset.error);
     assert.equal(unset.stateRoot, SKILL_DIR);
   });
+
+  it('refuses a relative EXTERNAL_ADVISOR_HOME, and still accepts an absolute one', () => {
+    // A relative value was assigned to ROOT as-is, so config.json and runs/ resolved beneath the
+    // process working directory: the same command run from two directories silently used two
+    // different states, and doctor reported a stateRoot that could not be resolved on its own.
+    // Resolving it to an absolute path here would keep that cwd-dependence and only hide it, so
+    // an ambiguous value is refused instead.
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
+
+    for (const home of ['mystate', './mystate', '../mystate']) {
+      const out = runCli(['doctor'], { home, bin });
+
+      assert.equal(out.ok, false, `EXTERNAL_ADVISOR_HOME="${home}" was accepted`);
+      assert.match(out.error, /EXTERNAL_ADVISOR_HOME/);
+      assert.match(out.error, /absolute/);
+    }
+
+    // runCli runs from SKILL_DIR, so a relative value that was accepted would have created the
+    // state directory inside this repository and tripped the skill's own write guard.
+    assert.equal(existsSync(join(SKILL_DIR, 'mystate')), false, 'a state directory was created under cwd');
+
+    const absolute = tmp('home-absolute');
+    const out = runCli(['doctor'], { home: absolute, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.stateRoot, absolute);
+  });
 });
 
 describe('doctor and labels', () => {

@@ -259,7 +259,7 @@ Packets and raw responses are written to the state directory's `runs/` and kept 
 
 ```bash
 claude --plugin-dir .      # load this checkout as a plugin, no install
-node --test run.test.mjs   # the 72-test suite
+node --test run.test.mjs   # the 73-test suite
 claude plugin validate . --strict
 ```
 

@@ -461,7 +461,7 @@ be edited further without its status line moving. Git-ignored files are out of s
 `node --test run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
 all three providers end to end, and the research verb's argument rules and scratch cleanup.
-72 tests. The suite stubs `gh`, `cursor-agent`, `agy` and `codex` on PATH, so it needs
+73 tests. The suite stubs `gh`, `cursor-agent`, `agy` and `codex` on PATH, so it needs
 no network and no account with any vendor. Run it after a Cursor, Antigravity or Codex CLI upgrade,
 alongside re-checking what `--mode ask`, `--mode plan` and `-s read-only` actually block.
 
