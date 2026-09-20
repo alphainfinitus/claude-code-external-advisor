@@ -43,3 +43,23 @@ jobs:
           git --version
 
       - run: node --test run.test.mjs
+
+  # Separate from the test matrix on purpose: this job needs the Claude Code CLI, and installing it
+  # four times across the 2x2 matrix would dwarf a suite that finishes in seconds.
+  validate:
+    name: plugin manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - run: npm install -g @anthropic-ai/claude-code
+
+      # Validate the directory, not .claude-plugin/plugin.json. With both manifests present this
+      # runs as a marketplace check, which still reaches plugin.json through the entry but skips
+      # the plugin-root CLAUDE.md warning that would otherwise fail --strict.
+      - run: claude plugin validate . --strict
