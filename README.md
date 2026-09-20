@@ -58,17 +58,20 @@ brew install codex          # or: npm install -g @openai/codex
 codex login
 ```
 
-To give it to a whole team, add the marketplace and install the plugin, both at project scope:
+To give it to a whole team, add the marketplace and install the plugin at project scope. These are
+shell commands: `--scope` is a CLI flag, and the `/plugin` slash command asks you to pick a scope
+interactively instead.
 
-```
-/plugin marketplace add alphainfinitus/claude-code-external-advisor --scope project
-/plugin install external-advisor@alphainfinitus --scope project
+```bash
+claude plugin marketplace add alphainfinitus/claude-code-external-advisor --scope project
+claude plugin install external-advisor@alphainfinitus --scope project
 ```
 
 Both write into the repository's `.claude/settings.json` — the marketplace under
 `extraKnownMarketplaces`, the plugin under `enabledPlugins` — so they travel with the repo. A
-teammate who clones it still runs the install once themselves: Claude Code does not auto-install
-code from an external repository on their behalf.
+teammate who clones it picks up the marketplace automatically once they trust the folder, but runs
+the plugin install once themselves: Claude Code does not auto-install code from an external
+repository on their behalf.
 
 ## Quick start
 
