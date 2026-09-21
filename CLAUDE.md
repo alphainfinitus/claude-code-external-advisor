@@ -8,7 +8,7 @@ A Claude Code plugin (this repository) that shells out to a second coding-agent 
 from a non-Claude model. Three are supported: the Cursor CLI (`cursor-agent`, `--mode ask`), the
 Google Antigravity CLI (`agy`, `--mode plan`) and the OpenAI Codex CLI (`codex`, `-s read-only`).
 Each job (`review`, `advise`, `consult`, `research`) picks its own provider and model.
-`README.md` covers the user-facing story (modes, privacy, config keys);
+`README.md` covers the user-facing story (modes, install, example prompts, limits);
 `SKILL.md` is the runtime instruction doc Claude follows when the skill is invoked. Don't
 duplicate either here.
 
