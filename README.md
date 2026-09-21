@@ -36,17 +36,7 @@ convincing.
 
 ## Install
 
-First remove any copy installed the old way, as a skill:
-
-```bash
-rm -rf ~/.claude/skills/external-advisor
-```
-
-Skip that and the plugin installs but never runs. Claude Code drops a plugin's skill when a skill
-of the same name already sits under `~/.claude/skills/`, so the old copy keeps winning: you go on
-running the old code against the old state, and nothing anywhere tells you so.
-
-Then, in Claude Code:
+In Claude Code:
 
 ```
 /plugin marketplace add alphainfinitus/claude-code-external-advisor
@@ -116,10 +106,6 @@ State lives in the plugin's own data directory, outside any repository:
 
 It holds `config.json` and `runs/`. It survives plugin updates, and is removed when you uninstall
 unless you pass `--keep-data`.
-
-State used to live in the install directory itself, `~/.claude/skills/external-advisor/`. If you
-have one there, copy its `config.json` into the directory above to keep your model picks. The run
-history can stay behind.
 
 Because it sits outside every repository, run artifacts do not appear in a project's `git status`
 or trip the write guard. (The exception is running `run.mjs` straight from a checkout of this repo
