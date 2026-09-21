@@ -35,7 +35,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
-          # No `cache:` key: the skill is stdlib-only, so there is no lockfile to cache from.
+          # No `cache:` key: the runner is stdlib-only, so there is no lockfile to cache from.
 
       - name: Node and git versions
         run: |

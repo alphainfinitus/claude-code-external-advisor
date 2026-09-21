@@ -36,17 +36,7 @@ convincing.
 
 ## Install
 
-First remove any copy installed the old way, as a skill:
-
-```bash
-rm -rf ~/.claude/skills/external-advisor
-```
-
-Skip that and the plugin installs but never runs. Claude Code drops a plugin's skill when a skill
-of the same name already sits under `~/.claude/skills/`, so the old copy keeps winning: you go on
-running the old code against the old state, and nothing anywhere tells you so.
-
-Then, in Claude Code:
+In Claude Code:
 
 ```
 /plugin marketplace add alphainfinitus/claude-code-external-advisor
@@ -94,7 +84,7 @@ set up the external advisor
 That runs a health check, asks you to pick a model for each of the four modes, and writes the
 config.
 
-Then just ask for what you want. The skill picks the mode from the shape of the request:
+Then just ask for what you want. Claude picks the mode from the shape of the request:
 
 ```
 review PR 1234 with the external advisor
@@ -117,10 +107,6 @@ State lives in the plugin's own data directory, outside any repository:
 It holds `config.json` and `runs/`. It survives plugin updates, and is removed when you uninstall
 unless you pass `--keep-data`.
 
-State used to live in the install directory itself, `~/.claude/skills/external-advisor/`. If you
-have one there, copy its `config.json` into the directory above to keep your model picks. The run
-history can stay behind.
-
 Because it sits outside every repository, run artifacts do not appear in a project's `git status`
 or trip the write guard. (The exception is running `run.mjs` straight from a checkout of this repo
 with no `EXTERNAL_ADVISOR_HOME` set — it then writes beside itself, which is why `/config.json`
@@ -133,7 +119,7 @@ The config file in that directory:
 
 | Key | Meaning |
 |---|---|
-| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required; there is no separate provider key. On `codex` the model half usually ends in a reasoning-effort suffix, e.g. `"codex/gpt-5.6-terra:xhigh"`; a model that offers no efforts is listed bare, and runs at codex's default effort. |
+| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required. On `codex` the model half usually ends in a reasoning-effort suffix, e.g. `"codex/gpt-5.6-terra:xhigh"`; a model that offers no efforts is listed bare, and runs at codex's default effort. |
 | `timeoutSeconds` | Hard kill for a run. Default 900. |
 | `keepRuns` | Run folders kept per repository. Default 20. |
 | `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy and codex ignore it. |
@@ -218,17 +204,17 @@ that is deleted when the run ends. What otherwise differs between modes is the t
 Cursor's model providers on `cursor`, Google on `agy`, OpenAI on `codex` - including any tool
 output that passed through it, and keeps a copy on disk. `agy` also keeps a full copy of every
 conversation under `~/.gemini/antigravity-cli/`, and `codex` keeps a full copy of every session
-under `~/.codex/sessions/`. Both are outside this skill's control. Tell people that before they
+under `~/.codex/sessions/`. Both are outside this plugin's control. Tell people that before they
 use it.
-`review`, `consult` and `research` forward no transcript, only the packet you or the skill
+`review`, `consult` and `research` forward no transcript, only the packet you or the plugin
 composed, so those are the modes to use when session contents matter. `research --scratch` is the
 most private of the four: no transcript, and not even the repository. Not nothing, though. The
-model is still handed the run directory, a path under the skill's state directory - which by
+model is still handed the run directory, a path under the plugin's data directory - which by
 default sits in your home directory, so it carries your username as well as this repository's
 name. On `agy` and `codex` the workspace is only the process working directory, so nothing stops a
 read outside it; codex was measured reading files under `~/.codex` and `~/.agents`.
 
-On `codex` the skill passes `--ignore-user-config`, so your own codex MCP servers do not spawn
+On `codex` the plugin passes `--ignore-user-config`, so your own codex MCP servers do not spawn
 during an advisor run. That was measured, not assumed: without the flag one of them threw an auth
 error, and with the flag that error was gone. It is not a full seal - codex still reads global
 skills under `~/.agents` and `~/.codex/plugins`.
@@ -259,7 +245,7 @@ Packets and raw responses are written to the state directory's `runs/` and kept 
 
 ```bash
 claude --plugin-dir .      # load this checkout as a plugin, no install
-node --test run.test.mjs   # the 73-test suite
+node --test run.test.mjs   # the 71-test suite
 claude plugin validate . --strict
 ```
 

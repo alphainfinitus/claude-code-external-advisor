@@ -17,7 +17,7 @@ duplicate either here.
 No build, no lint, no dependencies. The runner is stdlib-only Node (ESM, `.mjs`).
 
 ```bash
-node --test run.test.mjs                                         # full suite (~25s, 73 tests)
+node --test run.test.mjs                                         # full suite (~25s, 71 tests)
 node --test --test-name-pattern "write guard" run.test.mjs       # one describe/it by name
 node run.mjs doctor                                              # health check: binary, auth, live model list, resolved paths
 claude plugin validate . --strict                                # manifest check
@@ -97,9 +97,8 @@ artifacts out of `git status --exclude-standard` and unable to trip the write gu
 `/config.json` and `/runs/` entries in `.gitignore` cover only the fallback case, where `run.mjs`
 is invoked bare from this checkout. `sync-labels` is the only verb that writes config; it must
 never run concurrently with a run.
-`models.<job>` is `"<provider>/<model>"`; there is no global `provider` key, and a config that
-still carries one is rejected rather than half-read. `modelLabels` is keyed by provider, then
-model id.
+`models.<job>` is `"<provider>/<model>"`, and an unknown top-level key is rejected rather than
+half-read. `modelLabels` is keyed by provider, then model id.
 
 **`PROVIDERS` is the extension point.** It is the only place that knows a CLI's flags or output
 format. Each entry carries `bin`, `installHint`, `loginHint`, `readOnly` (the flag that makes the

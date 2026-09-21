@@ -24,8 +24,8 @@ import { basename, dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-const SKILL_DIR = dirname(fileURLToPath(import.meta.url));
-const RUNNER = join(SKILL_DIR, 'run.mjs');
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+const RUNNER = join(PLUGIN_DIR, 'run.mjs');
 
 /** A provider that answers without reading anything, so a run reaches the guards and exits. */
 const AGENT_OK = `echo '{"type":"result","result":"stub review","session_id":"stub-1"}'`;
@@ -239,7 +239,7 @@ function runCli(args, opts = {}) {
   try {
     return JSON.parse(
       execFileSync(process.execPath, [RUNNER, ...args], {
-        cwd: SKILL_DIR,
+        cwd: PLUGIN_DIR,
         encoding: 'utf8',
         env: childEnv(opts),
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -255,7 +255,7 @@ function runCli(args, opts = {}) {
 function runStatus(args, opts = {}) {
   try {
     execFileSync(process.execPath, [RUNNER, ...args], {
-      cwd: SKILL_DIR,
+      cwd: PLUGIN_DIR,
       encoding: 'utf8',
       env: childEnv(opts),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -501,20 +501,6 @@ describe('config resolution', () => {
     assert.equal(out.error, 'unknown provider "nope" in models.consult');
   });
 
-  it('rejects a config that still carries the old provider key', () => {
-    const home = tmp('home');
-    writeConfig(home, { provider: 'cursor', models: { consult: 'cursor/m1' } });
-    const repo = initRepo(tmp('cfg'));
-    commit(repo, 'f.txt', 'x\n', 'init');
-    writeFileSync(join(repo, 'q.md'), 'question');
-    const bin = stubBin({ 'cursor-agent': AGENT_OK });
-
-    const out = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md')], { home, bin });
-
-    assert.equal(out.ok, false);
-    assert.equal(out.error, 'config contains "provider"; remove it and use "<provider>/<model>" in models');
-  });
-
   it('keeps the job provider when --model has no prefix', () => {
     const home = tmp('home');
     writeConfig(home, CURSOR_MODELS);
@@ -586,7 +572,7 @@ describe('state root', () => {
     const unset = runCli(['doctor'], { bin });
 
     assert.equal(unset.ok, true, unset.error);
-    assert.equal(unset.stateRoot, SKILL_DIR);
+    assert.equal(unset.stateRoot, PLUGIN_DIR);
   });
 
   it('refuses a relative EXTERNAL_ADVISOR_HOME, and still accepts an absolute one', () => {
@@ -605,9 +591,9 @@ describe('state root', () => {
       assert.match(out.error, /absolute/);
     }
 
-    // runCli runs from SKILL_DIR, so a relative value that was accepted would have created the
-    // state directory inside this repository and tripped the skill's own write guard.
-    assert.equal(existsSync(join(SKILL_DIR, 'mystate')), false, 'a state directory was created under cwd');
+    // runCli runs from PLUGIN_DIR, so a relative value that was accepted would have created the
+    // state directory inside this repository and tripped the plugin's own write guard.
+    assert.equal(existsSync(join(PLUGIN_DIR, 'mystate')), false, 'a state directory was created under cwd');
 
     const absolute = tmp('home-absolute');
     const out = runCli(['doctor'], { home: absolute, bin });
@@ -633,17 +619,6 @@ describe('doctor and labels', () => {
     assert.equal(out.providers.cursor.readOnlyStrength, 'dispatch');
     assert.equal(out.providers.cursor.modelLabels['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
     assert.ok(out.providers.cursor.models.includes('grok-4.6'));
-  });
-
-  it('reports a stale provider key as a config error instead of crashing', () => {
-    const home = tmp('home');
-    writeConfig(home, { provider: 'cursor', models: { consult: 'cursor/m1' } });
-    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
-
-    const out = runCli(['doctor'], { home, bin });
-
-    assert.equal(out.ok, false);
-    assert.equal(out.configErrors[0], 'config contains "provider"; remove it and use "<provider>/<model>" in models');
   });
 
   it('writes model labels keyed by provider then model id', () => {
