@@ -461,7 +461,7 @@ be edited further without its status line moving. Git-ignored files are out of s
 `node --test run.test.mjs` covers the runner's safeguards: the non-git rejection, the write
 guard, untracked-only reviews, run-history isolation, both PR base-ref failures, config resolution,
 all three providers end to end, and the research verb's argument rules and scratch cleanup.
-73 tests. The suite stubs `gh`, `cursor-agent`, `agy` and `codex` on PATH, so it needs
+71 tests. The suite stubs `gh`, `cursor-agent`, `agy` and `codex` on PATH, so it needs
 no network and no account with any vendor. Run it after a Cursor, Antigravity or Codex CLI upgrade,
 alongside re-checking what `--mode ask`, `--mode plan` and `-s read-only` actually block.
 
@@ -478,9 +478,8 @@ The config file (`doctor` reports `configPath`):
 | `maxDiffBytes` / `maxAdviseBytes` | Size caps, in JavaScript characters. Truncation is always reported. |
 | `modelLabels` | `modelLabels[provider][modelId]` display names, refreshed by `sync-labels`. |
 
-There is no `provider` key. A config that still carries one is rejected with
-`config contains "provider"; remove it and use "<provider>/<model>" in models`. Any other unknown
-top-level key is rejected too, so a stale config is caught whole rather than half-read.
+An unknown top-level key is rejected with `unknown config key "<key>"; run setup`, so a stale
+config is caught whole rather than half-read.
 
 A codex model whose `:<effort>` suffix codex does not take is rejected the same way, with
 `models.<job>: unknown codex reasoning effort "<x>" in model "<id>"; valid efforts are ...`.

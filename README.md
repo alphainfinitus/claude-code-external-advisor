@@ -119,7 +119,7 @@ The config file in that directory:
 
 | Key | Meaning |
 |---|---|
-| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required; there is no separate provider key. On `codex` the model half usually ends in a reasoning-effort suffix, e.g. `"codex/gpt-5.6-terra:xhigh"`; a model that offers no efforts is listed bare, and runs at codex's default effort. |
+| `models.review` / `.advise` / `.consult` / `.research` | `"<provider>/<model>"` per mode, e.g. `"agy/gemini-3.1-pro-high"`. Both halves are required. On `codex` the model half usually ends in a reasoning-effort suffix, e.g. `"codex/gpt-5.6-terra:xhigh"`; a model that offers no efforts is listed bare, and runs at codex's default effort. |
 | `timeoutSeconds` | Hard kill for a run. Default 900. |
 | `keepRuns` | Run folders kept per repository. Default 20. |
 | `sandbox` | Boolean, default `true`. Cursor maps it to `--sandbox enabled` / `disabled`. agy and codex ignore it. |
@@ -245,7 +245,7 @@ Packets and raw responses are written to the state directory's `runs/` and kept 
 
 ```bash
 claude --plugin-dir .      # load this checkout as a plugin, no install
-node --test run.test.mjs   # the 73-test suite
+node --test run.test.mjs   # the 71-test suite
 claude plugin validate . --strict
 ```
 

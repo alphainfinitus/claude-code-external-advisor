@@ -502,12 +502,10 @@ const KNOWN_CONFIG_KEYS = new Set([
 function configErrors(cfg) {
   const errs = [];
   for (const key of Object.keys(cfg)) {
-    if (KNOWN_CONFIG_KEYS.has(key)) continue;
-    if (key === 'provider') errs.push('config contains "provider"; remove it and use "<provider>/<model>" in models');
-    else errs.push(`unknown config key "${key}"; run setup`);
+    if (!KNOWN_CONFIG_KEYS.has(key)) errs.push(`unknown config key "${key}"; run setup`);
   }
   // A leftover "enabled" string is truthy, so cursor would read it as sandbox on and agy as
-  // nothing at all. That is the same half-read failure the provider check exists to stop.
+  // nothing at all. That is the same half-read failure the unknown-key check exists to stop.
   if (typeof cfg.sandbox !== 'boolean') errs.push('sandbox must be true or false; run setup');
   for (const [job, value] of Object.entries(cfg.models || {})) {
     // Both halves are required. "cursor/" parses as a model of '', which would reach the CLI with

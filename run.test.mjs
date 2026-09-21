@@ -501,20 +501,6 @@ describe('config resolution', () => {
     assert.equal(out.error, 'unknown provider "nope" in models.consult');
   });
 
-  it('rejects a config that still carries the old provider key', () => {
-    const home = tmp('home');
-    writeConfig(home, { provider: 'cursor', models: { consult: 'cursor/m1' } });
-    const repo = initRepo(tmp('cfg'));
-    commit(repo, 'f.txt', 'x\n', 'init');
-    writeFileSync(join(repo, 'q.md'), 'question');
-    const bin = stubBin({ 'cursor-agent': AGENT_OK });
-
-    const out = runCli(['consult', '--repo', repo, '--packet', join(repo, 'q.md')], { home, bin });
-
-    assert.equal(out.ok, false);
-    assert.equal(out.error, 'config contains "provider"; remove it and use "<provider>/<model>" in models');
-  });
-
   it('keeps the job provider when --model has no prefix', () => {
     const home = tmp('home');
     writeConfig(home, CURSOR_MODELS);
@@ -633,17 +619,6 @@ describe('doctor and labels', () => {
     assert.equal(out.providers.cursor.readOnlyStrength, 'dispatch');
     assert.equal(out.providers.cursor.modelLabels['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
     assert.ok(out.providers.cursor.models.includes('grok-4.6'));
-  });
-
-  it('reports a stale provider key as a config error instead of crashing', () => {
-    const home = tmp('home');
-    writeConfig(home, { provider: 'cursor', models: { consult: 'cursor/m1' } });
-    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
-
-    const out = runCli(['doctor'], { home, bin });
-
-    assert.equal(out.ok, false);
-    assert.equal(out.configErrors[0], 'config contains "provider"; remove it and use "<provider>/<model>" in models');
   });
 
   it('writes model labels keyed by provider then model id', () => {
