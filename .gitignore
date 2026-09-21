@@ -1,9 +1,9 @@
 .DS_Store
 node_modules/
 
-# runtime state, generated next to the skill
-skill/config.json
-skill/runs/
+# runtime state, only created if run.mjs is invoked without EXTERNAL_ADVISOR_HOME
+/config.json
+/runs/
 
 # local design docs, not tracked
 .agent-artifacts/

@@ -1,0 +1,14 @@
+{
+  "name": "alphainfinitus",
+  "description": "Plugins by alphainfinitus.",
+  "owner": {
+    "name": "Mridul Kumar"
+  },
+  "plugins": [
+    {
+      "name": "external-advisor",
+      "source": "./",
+      "description": "Get a second opinion from a non-Claude model through the Cursor, Antigravity or OpenAI Codex CLI, without leaving Claude Code."
+    }
+  ]
+}

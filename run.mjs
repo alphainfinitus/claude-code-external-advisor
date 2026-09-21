@@ -20,23 +20,57 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SKILL_DIR = dirname(fileURLToPath(import.meta.url));
 
-// State lives inside the skill directory, next to run.mjs: each installation of the skill carries
-// its own config and run history, whether that is ~/.claude/skills/ or a repo's .agents/skills/.
-// The repo copy must gitignore config.json and runs/ - being ignored is also what keeps run
-// artifacts out of `git status --exclude-standard`, so they cannot trip our own write guard.
+// State lives in the plugin's own data directory, handed to us as EXTERNAL_ADVISOR_HOME by
+// SKILL.md and references/setup.md, which read it from ${CLAUDE_PLUGIN_DATA}. That directory sits
+// outside any repository, so run artifacts never reach `git status --exclude-standard` and cannot
+// trip our own write guard. CLAUDE_PLUGIN_DATA is NOT readable here - Claude Code substitutes it
+// into skill text, it does not export it - so do not add an env fallback for it. Measured: a Bash
+// subprocess sees it unset even when that plugin's own skill triggered the call.
 let ROOT;
 let RUNS;
 let CONFIG_PATH;
 
 function resolveRoots() {
-  ROOT = process.env.EXTERNAL_ADVISOR_HOME || SKILL_DIR;
+  const given = process.env.EXTERNAL_ADVISOR_HOME;
+  // Set but empty is a typo, not a request for the default. SKILL.md passes the data directory
+  // through bash, and bash expands an unsubstituted ${CLAUDE_PLUGIN_DATA} to "". Falling back
+  // then would write config.json and runs/ into the plugin's install directory, which is
+  // version-scoped and replaced wholesale on the next update, so the model picks would vanish
+  // with no sign that anything went wrong. Unset is a different case and still falls back: that
+  // is what lets `node run.mjs` work from a checkout.
+  if (given !== undefined && given.trim() === '') {
+    fail(
+      'EXTERNAL_ADVISOR_HOME is set but empty. Set it to the plugin data directory, or unset it to use the directory run.mjs lives in.',
+    );
+  }
+  // A relative value resolves beneath the process working directory, so the same command run from
+  // two places silently uses two different states and `doctor` reports a stateRoot that cannot be
+  // resolved on its own. Calling resolve() here would keep that cwd-dependence and only hide it
+  // behind an absolute-looking path, so an ambiguous value is refused instead.
+  if (given !== undefined && !isAbsolute(given)) {
+    fail(
+      `EXTERNAL_ADVISOR_HOME must be an absolute path; got "${given}". A relative path would resolve against whatever directory you happen to run from.`,
+    );
+  }
+  ROOT = given || SKILL_DIR;
   RUNS = join(ROOT, 'runs');
   CONFIG_PATH = join(ROOT, 'config.json');
+  // Run directories are created with `recursive: true`, but `sync-labels` writes config.json with
+  // a bare writeFileSync. On a plugin data directory that has never been written to, that is an
+  // ENOENT before anything prints. Cheaper to guarantee the directory than to special-case it.
+  // A failure here is swallowed on purpose: this runs before verb dispatch, so throwing took
+  // doctor - the verb whose job is to explain a broken setup - down with the setup it was asked
+  // about. The verbs that really need to write still fail, from the write itself.
+  try {
+    mkdirSync(ROOT, { recursive: true });
+  } catch {
+    // Reported later by whatever tries to write, with the path it was actually writing.
+  }
 }
 
 const DEFAULT_CONFIG = {

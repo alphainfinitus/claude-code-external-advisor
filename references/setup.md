@@ -2,13 +2,22 @@
 
 The procedure `SKILL.md` sends you here for. Follow it in order; don't improvise from memory.
 
-`$SKILL` below means this skill's base directory, the one holding `run.mjs` — the same
-convention `SKILL.md` uses. It is reported to you when the skill loads. Never hardcode a path.
+Commands below need two real paths filled in:
+
+`EXTERNAL_ADVISOR_HOME="<state dir>" node "<plugin dir>/run.mjs" <verb>`
+
+**Take both from `SKILL.md`'s "Where the runner lives" section, which you have already read.**
+They are not filled in here. Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` and
+`${CLAUDE_PLUGIN_DATA}` into skill text, but this file reaches you through the Read tool, which
+returns it byte for byte — measured, not assumed. A placeholder written here would arrive
+literally and expand to an empty string.
+
+Keep the double quotes: either path can contain a space.
 
 Run this before the first use, and whenever the user wants a different model:
 
 ```bash
-node $SKILL/run.mjs doctor
+EXTERNAL_ADVISOR_HOME="<state dir>" node "<plugin dir>/run.mjs" doctor
 ```
 
 It returns JSON with `stateRoot`, `configPath`, `configExists`, `config`, `configErrors`, and a
@@ -73,22 +82,23 @@ interactively rather than making the user edit JSON:
    tool output that happened to pass through it, such as ticket contents, log queries or internal
    search results - to the model vendor behind the provider you picked. On `cursor` that is
    Cursor's model providers. On `agy` that is Google, and agy also keeps a full copy of every
-   conversation under `~/.gemini/antigravity-cli/`, outside this skill's control. On `codex` that
+   conversation under `~/.gemini/antigravity-cli/`, outside this plugin's control. On `codex` that
    is OpenAI, and codex likewise keeps a full copy of every session under `~/.codex/sessions/`.
    The runner also passes `--ignore-user-config` there, so the user's own codex MCP servers do not
    spawn during a run; that is not a full seal, because global skills under `~/.agents` and
    `~/.codex/plugins` are still read.
-   A copy is kept under the skill's own `runs/` directory too. It triggers on phrases as ordinary
+   A copy is kept under the plugin's own `runs/` directory too. It triggers on phrases as ordinary
    as "am I missing something". Say it plainly once. `review`, `consult` and `research` forward no
    transcript, only the packet, so those are the modes for when session contents matter - but note
    every mode gives the model the repository as its workspace by default, so it reads repository
    files in all of them. `research --scratch` is the one exception, and so the most private of the
    four: it hands over an empty throwaway directory instead of the repository. Not nothing, though:
-   the model is still handed the run directory, whose path sits under the skill's state directory -
-   by default inside the user's home, so it carries their username as well as the repository's
+   the model is still handed the run directory, whose path sits under the plugin's state
+   directory, inside the user's home, so it carries their username as well as the repository's
    name - and on `agy` and `codex` the workspace is only the process working directory, so nothing
    stops a read outside it.
 7. Write their picks into the config (`doctor` reports its exact path as `configPath`) as
    `"models": {"review": "<provider>/<model>", ...}`, then run
-   `node $SKILL/run.mjs sync-labels`, then one small `review --base HEAD~1` so they see it working
+   `EXTERNAL_ADVISOR_HOME="<state dir>" node "<plugin dir>/run.mjs" sync-labels`,
+   then one small `review --base HEAD~1` so they see it working
    (a bare `review` on a clean tree has no diff and errors out).

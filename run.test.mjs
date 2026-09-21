@@ -5,7 +5,7 @@
  * No network and no account with any vendor: `gh`, `cursor-agent`, `agy` and `codex` are stub
  * executables placed on PATH, and every repository is a throwaway under the OS temp directory.
  *
- *   node --test skill/run.test.mjs
+ *   node --test run.test.mjs
  */
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
@@ -550,6 +550,73 @@ describe('config resolution', () => {
   });
 });
 
+describe('state root', () => {
+  it('still answers doctor when the state directory cannot be created', () => {
+    // doctor's whole job is to diagnose a broken setup, so it is the one verb that has to survive
+    // one. Creating the state directory inside resolveRoots ran before verb dispatch, so an
+    // unwritable root aborted the process with a raw stack and left doctor unable to say why.
+    // /etc is not writable on macOS or on Linux CI.
+    const home = '/etc/nonexistent-state';
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
+
+    const out = runCli(['doctor'], { home, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.stateRoot, home);
+    assert.equal(out.configExists, false);
+    assert.equal(out.providers.cursor.authenticated, true);
+  });
+
+  it('refuses an EXTERNAL_ADVISOR_HOME that is set but empty, and still falls back when it is unset', () => {
+    // SKILL.md passes ${CLAUDE_PLUGIN_DATA} through bash, which expands an unsubstituted
+    // placeholder to "". `||` read that as unset and wrote config.json and runs/ into the
+    // plugin's install directory, which is version-scoped and replaced on the next update - so
+    // the model picks vanished silently. Unset is a different case and must keep falling back:
+    // that is what lets `node run.mjs` work from a checkout.
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
+
+    for (const home of ['', '   ']) {
+      const out = runCli(['doctor'], { home, bin });
+
+      assert.equal(out.ok, false, `EXTERNAL_ADVISOR_HOME="${home}" was accepted`);
+      assert.match(out.error, /EXTERNAL_ADVISOR_HOME/);
+      assert.match(out.error, /set but empty/);
+    }
+
+    const unset = runCli(['doctor'], { bin });
+
+    assert.equal(unset.ok, true, unset.error);
+    assert.equal(unset.stateRoot, SKILL_DIR);
+  });
+
+  it('refuses a relative EXTERNAL_ADVISOR_HOME, and still accepts an absolute one', () => {
+    // A relative value was assigned to ROOT as-is, so config.json and runs/ resolved beneath the
+    // process working directory: the same command run from two directories silently used two
+    // different states, and doctor reported a stateRoot that could not be resolved on its own.
+    // Resolving it to an absolute path here would keep that cwd-dependence and only hide it, so
+    // an ambiguous value is refused instead.
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
+
+    for (const home of ['mystate', './mystate', '../mystate']) {
+      const out = runCli(['doctor'], { home, bin });
+
+      assert.equal(out.ok, false, `EXTERNAL_ADVISOR_HOME="${home}" was accepted`);
+      assert.match(out.error, /EXTERNAL_ADVISOR_HOME/);
+      assert.match(out.error, /absolute/);
+    }
+
+    // runCli runs from SKILL_DIR, so a relative value that was accepted would have created the
+    // state directory inside this repository and tripped the skill's own write guard.
+    assert.equal(existsSync(join(SKILL_DIR, 'mystate')), false, 'a state directory was created under cwd');
+
+    const absolute = tmp('home-absolute');
+    const out = runCli(['doctor'], { home: absolute, bin });
+
+    assert.equal(out.ok, true, out.error);
+    assert.equal(out.stateRoot, absolute);
+  });
+});
+
 describe('doctor and labels', () => {
   it('reports every provider, not only the configured one', () => {
     const home = tmp('home');
@@ -590,6 +657,18 @@ describe('doctor and labels', () => {
     assert.equal(out.labels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
     const onDisk = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'));
     assert.equal(onDisk.modelLabels.cursor['gpt-5.6-sol-high'], 'GPT-5.6 Sol 1M High');
+  });
+
+  it('creates its state directory when it does not exist yet', () => {
+    // A plugin data directory that has never been written to. sync-labels writes config.json
+    // with a bare writeFileSync, so without a mkdir it dies on ENOENT before producing output.
+    const home = join(tmp('home'), 'data', 'external-advisor');
+    const bin = stubBin({ 'cursor-agent': cursorStub(), agy: agyStub(), codex: codexStub() });
+
+    const out = runCli(['sync-labels'], { home, bin });
+
+    assert.equal(out.ok, true);
+    assert.equal(existsSync(join(home, 'config.json')), true);
   });
 
   it('reports each provider web reach so a research model can be picked knowingly', () => {
