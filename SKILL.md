@@ -166,8 +166,8 @@ without it you get a general assessment.
 whole session - including tool output that merely passed through it, such as ticket contents,
 log queries or internal search results - to the vendor behind the configured provider. On `agy`
 that is Google, which also keeps its own copy under `~/.gemini/antigravity-cli/`, outside this
-skill's control. On `codex` that is OpenAI, which keeps its own copy of every session under
-`~/.codex/sessions/`, also outside this skill's control. There the runner passes
+plugin's control. On `codex` that is OpenAI, which keeps its own copy of every session under
+`~/.codex/sessions/`, also outside this plugin's control. There the runner passes
 `--ignore-user-config`, so the user's own codex MCP servers do not spawn during a run. That is not
 a full seal: global skills under `~/.agents` and `~/.codex/plugins` are still read. `review`,
 `consult` and `research` forward no transcript, so those are the modes for when session contents

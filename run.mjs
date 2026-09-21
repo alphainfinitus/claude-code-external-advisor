@@ -23,7 +23,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SKILL_DIR = dirname(fileURLToPath(import.meta.url));
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
 // State lives in the plugin's own data directory, handed to us as EXTERNAL_ADVISOR_HOME by
 // SKILL.md and references/setup.md, which read it from ${CLAUDE_PLUGIN_DATA}. That directory sits
@@ -57,7 +57,7 @@ function resolveRoots() {
       `EXTERNAL_ADVISOR_HOME must be an absolute path; got "${given}". A relative path would resolve against whatever directory you happen to run from.`,
     );
   }
-  ROOT = given || SKILL_DIR;
+  ROOT = given || PLUGIN_DIR;
   RUNS = join(ROOT, 'runs');
   CONFIG_PATH = join(ROOT, 'config.json');
   // Run directories are created with `recursive: true`, but `sync-labels` writes config.json with
@@ -813,7 +813,7 @@ function buildEnvelope(provider, res, timeoutSeconds, resume) {
 }
 
 function readPrompt(name) {
-  const p = join(SKILL_DIR, 'prompts', `${name}.md`);
+  const p = join(PLUGIN_DIR, 'prompts', `${name}.md`);
   if (!existsSync(p)) fail(`missing prompt template: ${p}`);
   return readFileSync(p, 'utf8');
 }

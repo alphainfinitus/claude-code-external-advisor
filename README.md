@@ -84,7 +84,7 @@ set up the external advisor
 That runs a health check, asks you to pick a model for each of the four modes, and writes the
 config.
 
-Then just ask for what you want. The skill picks the mode from the shape of the request:
+Then just ask for what you want. Claude picks the mode from the shape of the request:
 
 ```
 review PR 1234 with the external advisor
@@ -204,17 +204,17 @@ that is deleted when the run ends. What otherwise differs between modes is the t
 Cursor's model providers on `cursor`, Google on `agy`, OpenAI on `codex` - including any tool
 output that passed through it, and keeps a copy on disk. `agy` also keeps a full copy of every
 conversation under `~/.gemini/antigravity-cli/`, and `codex` keeps a full copy of every session
-under `~/.codex/sessions/`. Both are outside this skill's control. Tell people that before they
+under `~/.codex/sessions/`. Both are outside this plugin's control. Tell people that before they
 use it.
-`review`, `consult` and `research` forward no transcript, only the packet you or the skill
+`review`, `consult` and `research` forward no transcript, only the packet you or the plugin
 composed, so those are the modes to use when session contents matter. `research --scratch` is the
 most private of the four: no transcript, and not even the repository. Not nothing, though. The
-model is still handed the run directory, a path under the skill's state directory - which by
+model is still handed the run directory, a path under the plugin's data directory - which by
 default sits in your home directory, so it carries your username as well as this repository's
 name. On `agy` and `codex` the workspace is only the process working directory, so nothing stops a
 read outside it; codex was measured reading files under `~/.codex` and `~/.agents`.
 
-On `codex` the skill passes `--ignore-user-config`, so your own codex MCP servers do not spawn
+On `codex` the plugin passes `--ignore-user-config`, so your own codex MCP servers do not spawn
 during an advisor run. That was measured, not assumed: without the flag one of them threw an auth
 error, and with the flag that error was gone. It is not a full seal - codex still reads global
 skills under `~/.agents` and `~/.codex/plugins`.

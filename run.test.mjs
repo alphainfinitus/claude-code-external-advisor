@@ -24,8 +24,8 @@ import { basename, dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-const SKILL_DIR = dirname(fileURLToPath(import.meta.url));
-const RUNNER = join(SKILL_DIR, 'run.mjs');
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+const RUNNER = join(PLUGIN_DIR, 'run.mjs');
 
 /** A provider that answers without reading anything, so a run reaches the guards and exits. */
 const AGENT_OK = `echo '{"type":"result","result":"stub review","session_id":"stub-1"}'`;
@@ -239,7 +239,7 @@ function runCli(args, opts = {}) {
   try {
     return JSON.parse(
       execFileSync(process.execPath, [RUNNER, ...args], {
-        cwd: SKILL_DIR,
+        cwd: PLUGIN_DIR,
         encoding: 'utf8',
         env: childEnv(opts),
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -255,7 +255,7 @@ function runCli(args, opts = {}) {
 function runStatus(args, opts = {}) {
   try {
     execFileSync(process.execPath, [RUNNER, ...args], {
-      cwd: SKILL_DIR,
+      cwd: PLUGIN_DIR,
       encoding: 'utf8',
       env: childEnv(opts),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -572,7 +572,7 @@ describe('state root', () => {
     const unset = runCli(['doctor'], { bin });
 
     assert.equal(unset.ok, true, unset.error);
-    assert.equal(unset.stateRoot, SKILL_DIR);
+    assert.equal(unset.stateRoot, PLUGIN_DIR);
   });
 
   it('refuses a relative EXTERNAL_ADVISOR_HOME, and still accepts an absolute one', () => {
@@ -591,9 +591,9 @@ describe('state root', () => {
       assert.match(out.error, /absolute/);
     }
 
-    // runCli runs from SKILL_DIR, so a relative value that was accepted would have created the
-    // state directory inside this repository and tripped the skill's own write guard.
-    assert.equal(existsSync(join(SKILL_DIR, 'mystate')), false, 'a state directory was created under cwd');
+    // runCli runs from PLUGIN_DIR, so a relative value that was accepted would have created the
+    // state directory inside this repository and tripped the plugin's own write guard.
+    assert.equal(existsSync(join(PLUGIN_DIR, 'mystate')), false, 'a state directory was created under cwd');
 
     const absolute = tmp('home-absolute');
     const out = runCli(['doctor'], { home: absolute, bin });
