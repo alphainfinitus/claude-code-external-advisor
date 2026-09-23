@@ -6,6 +6,8 @@ It works through the [Cursor](https://cursor.com/docs/cli/overview), [Antigravit
 **Why:** Claude reviewing Claude's work shares Claude's blind spots.
 A different model never saw Claude's reasoning, so it has no reason to be convinced by it.
 
+https://github.com/user-attachments/assets/5ff1ee6e-aa7b-4d9e-855a-4c7c0c63cf9d
+
 ## What it does
 
 Four modes. Claude picks one from how you ask.
