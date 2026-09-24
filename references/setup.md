@@ -42,6 +42,25 @@ interactively rather than making the user edit JSON:
    Treat that as unknown, not as safe.
 5. **Pick a provider and a model, per job.** Ask through the question UI: `review`, then `advise`,
    then `consult`, then `research`.
+   - **Look for picks from the old skill install first.** Before this plugin, the tool was a skill
+     that kept `config.json` next to its own files, where this plugin never reads it. Look for one
+     in `~/.claude/skills/external-advisor/`, and in `.agents/skills/external-advisor/` or
+     `.claude/skills/external-advisor/` under the repository root (in a git worktree, check the
+     main checkout's copies too). The old shape has a top-level `provider` key and bare model ids.
+     Convert it:
+     - each `models.<job>` with no `/` becomes `"<provider>/<id>"`, taking the old `provider`
+       value, or `cursor` when the file has none;
+     - `sandbox: "enabled"` becomes `true` and `"disabled"` becomes `false`; a boolean stays;
+     - `timeoutSeconds`, `keepRuns`, `maxDiffBytes` and `maxAdviseBytes` copy over unchanged;
+     - `provider`, `modelLabels` and any other key are dropped. Step 7's `sync-labels` rebuilds
+       the labels.
+
+     Keep a converted pick only when its provider is installed and signed in, and the model is
+     still in that provider's live `models` list from `doctor`. Offer the kept picks in one
+     question, as the recommended option, naming each one. Ask the jobs that are left the usual
+     way below: `research` always, since the old skill had no such job, plus any job whose pick
+     was not kept or that the user wants to change. If two old configs disagree, show both and
+     let the user choose.
    - If more than one provider is installed and authenticated, ask **which provider first**, then
      the model. If only one is, go straight to the model.
    - 200+ model ids is not a menu. Offer 3-4 curated options per job.
@@ -102,3 +121,8 @@ interactively rather than making the user edit JSON:
    `EXTERNAL_ADVISOR_HOME="<state dir>" node "<plugin dir>/run.mjs" sync-labels`,
    then one small `review --base HEAD~1` so they see it working
    (a bare `review` on a clean tree has no diff and errors out).
+   If step 5 found an old config, offer to delete the old `config.json` and `runs/` now that the
+   new config is written, and ask before deleting anything. If that folder still holds a
+   `SKILL.md`, the old skill is still installed there. A same-named skill under `~/.claude/skills/`
+   stops this plugin's skill from loading, so recommend removing it. Inside a repository that is a
+   change to tracked files, so tell the user rather than deleting it.

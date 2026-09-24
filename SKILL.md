@@ -47,14 +47,16 @@ Re-check what each read-only mode blocks after a CLI upgrade.
 ## setup — first run, and changing models
 
 Read `references/setup.md`, next to this file, and follow its seven steps in order. Do that
-whenever the user asks to set the advisor up or change a model, whenever `doctor` returns a
-non-empty `configErrors`, and whenever you are about to write `config.json` at all — by hand or
-through `sync-labels`. It covers the health check, installing and signing in, choosing a provider
-and model per job, and what `advise` sends to the vendor. The rules for reading `doctor` output
-are there too: `configErrors` first, every warning relayed verbatim, and an unreadable
-`toolPermission` treated as unknown rather than safe. Do not improvise setup from memory, and do
-not skip a step because it looks like a formality — the question order and the verbatim warnings
-are the point.
+whenever the user asks to set the advisor up or change a model, whenever a run fails with an
+`error` ending in `run setup`, whenever `doctor` returns a non-empty `configErrors`, and whenever
+you are about to write `config.json` at all — by hand or through `sync-labels`. When a failed run
+sent you here, rerun the user's original request once setup is done, in place of step 7's test
+review. It covers the health check, installing and signing in, carrying picks over from the old
+skill install, choosing a provider and model per job, and what `advise` sends to the vendor. The
+rules for reading `doctor` output are there too: `configErrors` first, every warning relayed
+verbatim, and an unreadable `toolPermission` treated as unknown rather than safe. Do not improvise
+setup from memory, and do not skip a step because it looks like a formality — the question order
+and the verbatim warnings are the point.
 
 Never guess at model IDs — they rot fast, and `doctor` is the live list per provider. Steer away
 from `claude-*` for `review` and `consult` on **any** provider: a Claude reviewing Claude's work
@@ -411,7 +413,8 @@ user should know which is which.
 binary, missing packet file, bad config) carry only `error`, plus hints such as `installHint` and
 `thenRun`. The failure modes are
 plain-text and self-explanatory (invalid API key, unknown model, timeout), and paraphrasing
-them loses the fix. Don't retry a failed run unchanged.
+them loses the fix. Don't retry a failed run unchanged. An `error` ending in `run setup` means the
+config is missing or out of date: go through setup (see above), then rerun the original request.
 
 When a CLI exits non-zero but said why, `error` is that reason rather than `<bin> exited <n>`, and
 `raw` quotes the stream the reason was on. So a model id the account cannot use reports

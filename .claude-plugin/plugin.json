@@ -1,7 +1,7 @@
 {
   "name": "external-advisor",
   "description": "Get a second opinion from a non-Claude model through the Cursor, Antigravity or OpenAI Codex CLI, without leaving Claude Code.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "Mridul Kumar"
   },
